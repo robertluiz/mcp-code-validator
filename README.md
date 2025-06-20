@@ -15,9 +15,9 @@ An advanced Model Context Protocol (MCP) server that indexes and validates TypeS
 
 ```bash
 # Start everything with one command
-./docker-manage.sh start
+./scripts/docker-manage.sh start
 
-# Configure Claude Code (see DOCKER_SETUP.md for details)
+# Configure Claude Code (see docs/DOCKER_SETUP.md for details)
 ```
 
 ## Core Indexing & Validation Tools
