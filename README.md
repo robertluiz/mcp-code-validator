@@ -298,6 +298,39 @@ The knowledge graph uses the following structure:
 - **Class** nodes with `name`, `language`, `body`, and timestamp properties
 - **`CONTAINS`** relationships linking files to their functions/classes
 
+## Branch-Based Context Management
+
+The MCP Code Validator supports branch-specific indexing and validation. See the detailed guide: [docs/BRANCH_CONTEXTS.md](docs/BRANCH_CONTEXTS.md)
+
+Quick example:
+```typescript
+// Index code for main branch
+await mcp.callTool('indexFile', {
+  filePath: 'src/auth/login.ts',
+  content: 'export function login(user, pass) { ... }',
+  language: 'typescript',
+  projectContext: 'my-app',
+  branch: 'main'
+});
+
+// Index same file for feature branch
+await mcp.callTool('indexFile', {
+  filePath: 'src/auth/login.ts', 
+  content: 'export function login(credentials) { ... }',
+  language: 'typescript',
+  projectContext: 'my-app',
+  branch: 'feature/oauth'
+});
+
+// Compare branches
+await mcp.callTool('manageContexts', {
+  action: 'compare-branches',
+  projectContext: 'my-app',
+  branch: 'feature/oauth',
+  targetBranch: 'main'
+});
+```
+
 ## Example Usage Workflows
 
 ### Initial Setup: Index Dependencies

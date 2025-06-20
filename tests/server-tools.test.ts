@@ -57,7 +57,7 @@ describe('MCP Server Tools', () => {
         frontendElements: [],
         imports: [],
         exports: []
-      }, 'src/test.ts', 'typescript');
+      }, 'src/test.ts', 'typescript', 'default', 'main');
       
       // The mock function should be called
       expect(indexParsedCode).toHaveBeenCalledWith(
@@ -73,7 +73,9 @@ describe('MCP Server Tools', () => {
           exports: []
         },
         'src/test.ts',
-        'typescript'
+        'typescript',
+        'default',
+        'main'
       );
     });
 
@@ -89,7 +91,7 @@ describe('MCP Server Tools', () => {
         frontendElements: [],
         imports: [],
         exports: []
-      }, 'src/empty.ts', 'typescript');
+      }, 'src/empty.ts', 'typescript', 'default', 'main');
       
       expect(indexParsedCode).toHaveBeenCalledWith(
         mockSession,
@@ -104,7 +106,9 @@ describe('MCP Server Tools', () => {
           exports: []
         },
         'src/empty.ts',
-        'typescript'
+        'typescript',
+        'default',
+        'main'
       );
     });
   });

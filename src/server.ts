@@ -12,9 +12,17 @@ dotenv.config();
 const driver = getDriver();
 
 /**
+ * Generate a context string that includes branch information
+ */
+function generateContext(projectContext: string = 'default', branch: string = 'main'): string {
+    return `${projectContext}:${branch}`;
+}
+
+/**
  * Helper to index all parsed code elements and link them to a parent file node.
  */
-async function indexParsedCode(session: Session, parsedCode: any, filePath: string, language: string, context: string = 'default') {
+async function indexParsedCode(session: Session, parsedCode: any, filePath: string, language: string, projectContext: string = 'default', branch: string = 'main') {
+    const context = generateContext(projectContext, branch);
     // Index functions
     for (const func of parsedCode.functions) {
         await session.executeWrite(tx =>
@@ -172,38 +180,57 @@ const server = new McpServer({
 // Register indexFile tool
 server.registerTool('indexFile', {
     title: 'Index Code File',
-    description: 'Parses and indexes entire source code files, including React components, hooks, and Next.js patterns.',
+    description: 'Parses and indexes entire source code files, including React components, hooks, and Next.js patterns. Supports branch-specific indexing.',
     inputSchema: {
         filePath: z.string().describe('The unique path of the file being indexed (e.g., "src/components/Button.tsx").'),
         content: z.string().describe('The full source code content of the file.'),
         language: z.string().describe('The programming language of the code (e.g., "typescript", "javascript").'),
         fileExtension: z.string().optional().describe('File extension to determine parser (ts, tsx, js, jsx). Auto-detected from filePath if not provided.'),
-        context: z.string().optional().describe('Project context/namespace (e.g., "my-app", "backend-api"). Defaults to "default".')
+        projectContext: z.string().optional().describe('Project context/namespace (e.g., "my-app", "backend-api"). Defaults to "default".'),
+        branch: z.string().optional().describe('Git branch name (e.g., "main", "develop", "feature/auth"). Defaults to "main".'),
+        verbose: z.boolean().optional().describe('Return detailed information (default: false)')
     }
-}, async ({ filePath, content, language, fileExtension, context = 'default' }) => {
+}, async ({ filePath, content, language, fileExtension, projectContext = 'default', branch = 'main', verbose = false }) => {
     const session = driver.session();
     try {
         // Auto-detect file extension if not provided
         const extension = fileExtension || filePath.split('.').pop() || 'ts';
         
         const parsedCode = parseCode(content, extension);
-        await indexParsedCode(session, parsedCode, filePath, language, context);
+        await indexParsedCode(session, parsedCode, filePath, language, projectContext, branch);
 
-        const summary = {
-            indexedFunctions: parsedCode.functions.length,
-            indexedClasses: parsedCode.classes.length,
-            indexedReactComponents: parsedCode.reactComponents?.length || 0,
-            indexedReactHooks: parsedCode.reactHooks?.length || 0,
-            indexedNextJsPatterns: parsedCode.nextjsPatterns?.length || 0,
-            indexedFrontendElements: parsedCode.frontendElements?.length || 0,
-            indexedImports: parsedCode.imports?.length || 0,
-            indexedExports: parsedCode.exports?.length || 0
-        };
+        const totalElements = parsedCode.functions.length + 
+                             parsedCode.classes.length + 
+                             (parsedCode.reactComponents?.length || 0) +
+                             (parsedCode.reactHooks?.length || 0) +
+                             (parsedCode.nextjsPatterns?.length || 0) +
+                             (parsedCode.frontendElements?.length || 0);
 
+        if (verbose) {
+            const summary = {
+                indexedFunctions: parsedCode.functions.length,
+                indexedClasses: parsedCode.classes.length,
+                indexedReactComponents: parsedCode.reactComponents?.length || 0,
+                indexedReactHooks: parsedCode.reactHooks?.length || 0,
+                indexedNextJsPatterns: parsedCode.nextjsPatterns?.length || 0,
+                indexedFrontendElements: parsedCode.frontendElements?.length || 0,
+                indexedImports: parsedCode.imports?.length || 0,
+                indexedExports: parsedCode.exports?.length || 0
+            };
+
+            return {
+                content: [{
+                    type: 'text',
+                    text: `Successfully indexed file: ${filePath}\n\nSummary:\n- Functions: ${summary.indexedFunctions}\n- Classes: ${summary.indexedClasses}\n- React Components: ${summary.indexedReactComponents}\n- React Hooks: ${summary.indexedReactHooks}\n- Next.js Patterns: ${summary.indexedNextJsPatterns}\n- Frontend Elements: ${summary.indexedFrontendElements}\n- Imports: ${summary.indexedImports}\n- Exports: ${summary.indexedExports}`
+                }]
+            };
+        }
+
+        // Concise return by default
         return {
             content: [{
                 type: 'text',
-                text: `Successfully indexed file: ${filePath}\n\nSummary:\n- Functions: ${summary.indexedFunctions}\n- Classes: ${summary.indexedClasses}\n- React Components: ${summary.indexedReactComponents}\n- React Hooks: ${summary.indexedReactHooks}\n- Next.js Patterns: ${summary.indexedNextJsPatterns}\n- Frontend Elements: ${summary.indexedFrontendElements}\n- Imports: ${summary.indexedImports}\n- Exports: ${summary.indexedExports}`
+                text: `✓ ${filePath}: ${totalElements} elements`
             }]
         };
     } catch (error: any) {
@@ -223,13 +250,16 @@ server.registerTool('indexFile', {
 // Register validateCode tool
 server.registerTool('validateCode', {
     title: 'Validate Code',
-    description: 'Validates new code by checking for the existence of its functions and classes in the Neo4j knowledge graph.',
+    description: 'Validates new code by checking for the existence of its functions and classes in the Neo4j knowledge graph. Supports branch-specific validation.',
     inputSchema: {
         code: z.string().describe('The new source code snippet to validate.'),
         language: z.string().describe('The programming language of the code.'),
-        context: z.string().optional().describe('Project context/namespace to validate against. Defaults to "default".')
+        projectContext: z.string().optional().describe('Project context/namespace to validate against. Defaults to "default".'),
+        branch: z.string().optional().describe('Git branch name to validate against. Defaults to "main".'),
+        verbose: z.boolean().optional().describe('Include code bodies in response (default: false)')
     }
-}, async ({ code, language, context = 'default' }) => {
+}, async ({ code, language, projectContext = 'default', branch = 'main', verbose = false }) => {
+    const context = generateContext(projectContext, branch);
     const parsedCode = parseCode(code);
     const validationResults: any[] = [];
     const session = driver.session();
@@ -241,32 +271,51 @@ server.registerTool('validateCode', {
                 tx.run('MATCH (f:Function {name: $name, language: $language, context: $context}) RETURN f.body AS body, f.updatedAt as updatedAt', { name: func.name, language, context })
             );
             if (result.records.length > 0) {
-                validationResults.push({
+                const validationResult: any = {
                     elementName: func.name,
                     elementType: 'Function',
                     status: 'FOUND',
-                    message: 'A function with this name already exists.',
-                    indexedBody: result.records[0].get('body'),
-                });
+                    message: 'Exists'
+                };
+                
+                if (verbose) {
+                    validationResult.indexedBody = result.records[0].get('body');
+                    validationResult.message = 'A function with this name already exists.';
+                }
+                
+                validationResults.push(validationResult);
             } else {
                 validationResults.push({
                     elementName: func.name,
                     elementType: 'Function',
                     status: 'NOT_FOUND',
-                    message: 'This function does not exist in the knowledge graph. It might be new or a hallucination.',
+                    message: verbose ? 'This function does not exist in the knowledge graph. It might be new or a hallucination.' : 'New'
                 });
             }
         }
         // NOTE: Could add similar validation for classes here
 
-        const resultsText = validationResults.map(result => 
-            `${result.elementType} "${result.elementName}": ${result.status} - ${result.message}`
-        ).join('\n');
+        if (verbose) {
+            const resultsText = validationResults.map(result => 
+                `${result.elementType} "${result.elementName}": ${result.status} - ${result.message}`
+            ).join('\n');
 
+            return {
+                content: [{
+                    type: 'text',
+                    text: `Validation Results:\n${resultsText}`
+                }]
+            };
+        }
+
+        // Concise format
+        const found = validationResults.filter(r => r.status === 'FOUND').length;
+        const notFound = validationResults.filter(r => r.status === 'NOT_FOUND').length;
+        
         return {
             content: [{
                 type: 'text',
-                text: `Validation Results:\n${resultsText}`
+                text: `✓ Validated: ${found} exist, ${notFound} new`
             }]
         };
     } catch (error: any) {
@@ -286,7 +335,7 @@ server.registerTool('validateCode', {
 // Register indexFunctions tool
 server.registerTool('indexFunctions', {
     title: 'Index Functions',
-    description: 'Indexes a list of individual functions into Neo4j without requiring a full file context.',
+    description: 'Indexes a list of individual functions into Neo4j without requiring a full file context. Supports branch-specific indexing.',
     inputSchema: {
         functions: z.array(z.object({
             name: z.string().describe('The function name'),
@@ -294,9 +343,11 @@ server.registerTool('indexFunctions', {
             filePath: z.string().optional().describe('Optional file path where the function belongs')
         })).describe('Array of functions to index'),
         language: z.string().describe('The programming language of the functions'),
-        context: z.string().optional().describe('Project context/namespace (e.g., "my-app", "backend-api"). Defaults to "default".')
+        projectContext: z.string().optional().describe('Project context/namespace (e.g., "my-app", "backend-api"). Defaults to "default".'),
+        branch: z.string().optional().describe('Git branch name. Defaults to "main".')
     }
-}, async ({ functions, language, context = 'default' }) => {
+}, async ({ functions, language, projectContext = 'default', branch = 'main' }) => {
+    const context = generateContext(projectContext, branch);
     const session = driver.session();
     try {
         let indexedCount = 0;
@@ -356,14 +407,17 @@ server.registerTool('indexFunctions', {
 // Register validateFile tool
 server.registerTool('validateFile', {
     title: 'Validate File',
-    description: 'Validates an entire file by checking if it exists in the knowledge graph and comparing its functions and classes.',
+    description: 'Validates an entire file by checking if it exists in the knowledge graph and comparing its functions and classes. Supports branch-specific validation.',
     inputSchema: {
         filePath: z.string().describe('The file path to validate'),
         content: z.string().describe('The file content to validate against the knowledge graph'),
         language: z.string().describe('The programming language of the file'),
-        context: z.string().optional().describe('Project context/namespace (e.g., "my-app", "backend-api"). Defaults to "default".')
+        projectContext: z.string().optional().describe('Project context/namespace (e.g., "my-app", "backend-api"). Defaults to "default".'),
+        branch: z.string().optional().describe('Git branch name to validate against. Defaults to "main".'),
+        verbose: z.boolean().optional().describe('Return detailed validation results (default: false)')
     }
-}, async ({ filePath, content, language, context = 'default' }) => {
+}, async ({ filePath, content, language, projectContext = 'default', branch = 'main', verbose = false }) => {
+    const context = generateContext(projectContext, branch);
     const session = driver.session();
     try {
         // Check if file exists in knowledge graph with context
@@ -375,37 +429,42 @@ server.registerTool('validateFile', {
         const parsedCode = parseCode(content);
         const validationResults: any[] = [];
 
-        // Validate functions in the file
-        for (const func of parsedCode.functions) {
-            const funcResult = await session.executeRead(tx =>
+        // Batch validate all functions at once
+        if (parsedCode.functions.length > 0) {
+            const functionNames = parsedCode.functions.map(f => f.name);
+            const batchResult = await session.executeRead(tx =>
                 tx.run(`
-                    MATCH (file:File {path: $filePath, context: $context})-[:CONTAINS]->(f:Function {name: $name, language: $language, context: $context})
-                    RETURN f.body AS body, f.updatedAt as updatedAt
-                `, { filePath, name: func.name, language, context })
+                    MATCH (file:File {path: $filePath, context: $context})-[:CONTAINS]->(f:Function {context: $context})
+                    WHERE f.name IN $names AND f.language = $language
+                    RETURN f.name AS name, f.body AS body
+                `, { filePath, names: functionNames, language, context })
             );
 
-            if (funcResult.records.length > 0) {
-                const existingBody = funcResult.records[0].get('body');
-                const bodyMatches = existingBody === func.body;
-                
-                validationResults.push({
-                    elementName: func.name,
-                    elementType: 'Function',
-                    status: bodyMatches ? 'MATCH' : 'MODIFIED',
-                    message: bodyMatches 
-                        ? 'Function exists and matches exactly'
-                        : 'Function exists but has been modified',
-                    hasChanges: !bodyMatches
-                });
-            } else {
-                validationResults.push({
-                    elementName: func.name,
-                    elementType: 'Function',
-                    status: 'NEW',
-                    message: 'Function is new and not in knowledge graph',
-                    hasChanges: true
-                });
-            }
+            const existingFunctions = new Map();
+            batchResult.records.forEach(record => {
+                existingFunctions.set(record.get('name'), record.get('body'));
+            });
+
+            parsedCode.functions.forEach(func => {
+                if (existingFunctions.has(func.name)) {
+                    const existingBody = existingFunctions.get(func.name);
+                    const bodyMatches = existingBody === func.body;
+                    
+                    validationResults.push({
+                        elementName: func.name,
+                        elementType: 'Function',
+                        status: bodyMatches ? 'MATCH' : 'MODIFIED',
+                        hasChanges: !bodyMatches
+                    });
+                } else {
+                    validationResults.push({
+                        elementName: func.name,
+                        elementType: 'Function',
+                        status: 'NEW',
+                        hasChanges: true
+                    });
+                }
+            });
         }
 
         // Validate classes in the file
@@ -449,25 +508,42 @@ server.registerTool('validateFile', {
             matchingElements: validationResults.filter(r => r.status === 'MATCH').length
         };
 
-        const resultsText = [
-            `File validation for: ${filePath}`,
-            `File exists in knowledge graph: ${fileExists ? 'Yes' : 'No'}`,
-            `\nSummary:`,
-            `- Total elements: ${summary.totalElements}`,
-            `- New elements: ${summary.newElements}`,
-            `- Modified elements: ${summary.modifiedElements}`,
-            `- Matching elements: ${summary.matchingElements}`,
-            `\nDetailed results:`
-        ].join('\n');
+        if (verbose) {
+            const resultsText = [
+                `File validation for: ${filePath}`,
+                `File exists in knowledge graph: ${fileExists ? 'Yes' : 'No'}`,
+                `\nSummary:`,
+                `- Total elements: ${summary.totalElements}`,
+                `- New elements: ${summary.newElements}`,
+                `- Modified elements: ${summary.modifiedElements}`,
+                `- Matching elements: ${summary.matchingElements}`,
+                `\nDetailed results:`
+            ].join('\n');
 
-        const detailedResults = validationResults.map(result => 
-            `${result.elementType} "${result.elementName}": ${result.status} - ${result.message}`
-        ).join('\n');
+            const detailedResults = validationResults.map(result => {
+                const msg = result.status === 'MATCH' ? 'Function exists and matches exactly' :
+                           result.status === 'MODIFIED' ? 'Function exists but has been modified' :
+                           'Function is new and not in knowledge graph';
+                return `${result.elementType} "${result.elementName}": ${result.status} - ${msg}`;
+            }).join('\n');
 
+            return {
+                content: [{
+                    type: 'text',
+                    text: `${resultsText}\n${detailedResults}`
+                }]
+            };
+        }
+
+        // Concise return
+        const status = !fileExists ? 'new file' :
+                      summary.modifiedElements > 0 ? 'modified' :
+                      summary.newElements > 0 ? 'updated' : 'unchanged';
+        
         return {
             content: [{
                 type: 'text',
-                text: `${resultsText}\n${detailedResults}`
+                text: `✓ ${filePath}: ${status} (${summary.matchingElements}✓/${summary.modifiedElements}±/${summary.newElements}+)`
             }]
         };
     } catch (error: any) {
@@ -1544,13 +1620,15 @@ server.registerTool('indexDependencies', {
 
 // Register context management tool
 server.registerTool('manageContexts', {
-    title: 'Manage Project Contexts',
-    description: 'List, create, or delete project contexts in the Neo4j database.',
+    title: 'Manage Project Contexts and Branches',
+    description: 'List, create, or delete project contexts and branches in the Neo4j database. Supports branch-specific operations.',
     inputSchema: {
-        action: z.enum(['list', 'create', 'delete', 'clear']).describe('Action to perform: list all contexts, create new context, delete context, or clear context data.'),
-        context: z.string().optional().describe('Context name (required for create/delete/clear actions).')
+        action: z.enum(['list', 'list-branches', 'create', 'delete', 'clear', 'switch-branch', 'compare-branches']).describe('Action to perform on contexts/branches.'),
+        projectContext: z.string().optional().describe('Project context name (required for some actions).'),
+        branch: z.string().optional().describe('Branch name (required for branch-specific actions).'),
+        targetBranch: z.string().optional().describe('Target branch for comparison (used with compare-branches).')
     }
-}, async ({ action, context }) => {
+}, async ({ action, projectContext, branch, targetBranch }) => {
     const session = driver.session();
     try {
         switch (action) {
@@ -1578,16 +1656,22 @@ server.registerTool('manageContexts', {
                     };
                 }
                 
-                const contexts = listResult.records.map(record => ({
-                    context: record.get('context'),
-                    functions: record.get('functions').toNumber(),
-                    classes: record.get('classes').toNumber(),
-                    components: record.get('components').toNumber(),
-                    files: record.get('files').toNumber()
-                }));
+                const contexts = listResult.records.map(record => {
+                    const contextStr = record.get('context');
+                    const parts = contextStr.split(':');
+                    return {
+                        fullContext: contextStr,
+                        project: parts[0] || 'unknown',
+                        branch: parts[1] || 'main',
+                        functions: record.get('functions').toNumber(),
+                        classes: record.get('classes').toNumber(),
+                        components: record.get('components').toNumber(),
+                        files: record.get('files').toNumber()
+                    };
+                });
                 
                 const contextList = contexts.map(ctx => 
-                    `📁 ${ctx.context}: ${ctx.files} files, ${ctx.functions} functions, ${ctx.classes} classes, ${ctx.components} components`
+                    `📁 ${ctx.project} (${ctx.branch}): ${ctx.files} files, ${ctx.functions} functions, ${ctx.classes} classes, ${ctx.components} components`
                 ).join('\n');
                 
                 return {
@@ -1596,15 +1680,68 @@ server.registerTool('manageContexts', {
                         text: `Available Contexts:\n\n${contextList}\n\nTotal: ${contexts.length} contexts`
                     }]
                 };
+
+            case 'list-branches':
+                if (!projectContext) {
+                    throw new Error('Project context is required for list-branches action');
+                }
+                
+                const branchResult = await session.executeRead(tx =>
+                    tx.run(`
+                        MATCH (n) 
+                        WHERE n.context STARTS WITH $projectPrefix
+                        WITH DISTINCT n.context as context, 
+                             count{(f:Function {context: n.context})} as functions,
+                             count{(c:Class {context: n.context})} as classes,
+                             count{(rc:ReactComponent {context: n.context})} as components,
+                             count{(file:File {context: n.context})} as files
+                        RETURN context, functions, classes, components, files
+                        ORDER BY context
+                    `, { projectPrefix: `${projectContext}:` })
+                );
+                
+                if (branchResult.records.length === 0) {
+                    return {
+                        content: [{
+                            type: 'text',
+                            text: `No branches found for project context "${projectContext}".`
+                        }]
+                    };
+                }
+                
+                const branches = branchResult.records.map(record => {
+                    const contextStr = record.get('context');
+                    const branch = contextStr.split(':')[1] || 'main';
+                    return {
+                        branch,
+                        functions: record.get('functions').toNumber(),
+                        classes: record.get('classes').toNumber(),
+                        components: record.get('components').toNumber(),
+                        files: record.get('files').toNumber()
+                    };
+                });
+                
+                const branchList = branches.map(b => 
+                    `🌿 ${b.branch}: ${b.files} files, ${b.functions} functions, ${b.classes} classes, ${b.components} components`
+                ).join('\n');
+                
+                return {
+                    content: [{
+                        type: 'text',
+                        text: `Branches in "${projectContext}":\n\n${branchList}\n\nTotal: ${branches.length} branches`
+                    }]
+                };
                 
             case 'create':
-                if (!context) {
-                    throw new Error('Context name is required for create action');
+                if (!projectContext || !branch) {
+                    throw new Error('Both projectContext and branch are required for create action');
                 }
+                
+                const fullContext = generateContext(projectContext, branch);
                 
                 // Check if context already exists
                 const existsResult = await session.executeRead(tx =>
-                    tx.run('MATCH (n {context: $context}) RETURN count(n) as count', { context })
+                    tx.run('MATCH (n {context: $context}) RETURN count(n) as count', { context: fullContext })
                 );
                 
                 const count = existsResult.records[0].get('count').toNumber();
@@ -1612,7 +1749,7 @@ server.registerTool('manageContexts', {
                     return {
                         content: [{
                             type: 'text',
-                            text: `Context "${context}" already exists with ${count} nodes.`
+                            text: `Context "${projectContext}:${branch}" already exists with ${count} nodes.`
                         }]
                     };
                 }
@@ -1620,17 +1757,19 @@ server.registerTool('manageContexts', {
                 return {
                     content: [{
                         type: 'text',
-                        text: `Context "${context}" is ready for use. Start indexing files with this context to populate it.`
+                        text: `Context "${projectContext}:${branch}" is ready for use. Start indexing files with this context to populate it.`
                     }]
                 };
                 
             case 'delete':
-                if (!context) {
-                    throw new Error('Context name is required for delete action');
+                if (!projectContext || !branch) {
+                    throw new Error('Both projectContext and branch are required for delete action');
                 }
                 
+                const deleteContext = generateContext(projectContext, branch);
+                
                 const deleteResult = await session.executeWrite(tx =>
-                    tx.run('MATCH (n {context: $context}) DETACH DELETE n RETURN count(n) as deleted', { context })
+                    tx.run('MATCH (n {context: $context}) DETACH DELETE n RETURN count(n) as deleted', { context: deleteContext })
                 );
                 
                 const deleted = deleteResult.records[0].get('deleted').toNumber();
@@ -1638,17 +1777,19 @@ server.registerTool('manageContexts', {
                 return {
                     content: [{
                         type: 'text',
-                        text: `Deleted context "${context}" and ${deleted} associated nodes.`
+                        text: `Deleted context "${projectContext}:${branch}" and ${deleted} associated nodes.`
                     }]
                 };
                 
             case 'clear':
-                if (!context) {
-                    throw new Error('Context name is required for clear action');
+                if (!projectContext || !branch) {
+                    throw new Error('Both projectContext and branch are required for clear action');
                 }
                 
+                const clearContext = generateContext(projectContext, branch);
+                
                 const clearResult = await session.executeWrite(tx =>
-                    tx.run('MATCH (n {context: $context}) DETACH DELETE n RETURN count(n) as cleared', { context })
+                    tx.run('MATCH (n {context: $context}) DETACH DELETE n RETURN count(n) as cleared', { context: clearContext })
                 );
                 
                 const cleared = clearResult.records[0].get('cleared').toNumber();
@@ -1656,7 +1797,85 @@ server.registerTool('manageContexts', {
                 return {
                     content: [{
                         type: 'text',
-                        text: `Cleared ${cleared} nodes from context "${context}".`
+                        text: `Cleared ${cleared} nodes from context "${projectContext}:${branch}".`
+                    }]
+                };
+
+            case 'compare-branches':
+                if (!projectContext || !branch || !targetBranch) {
+                    throw new Error('projectContext, branch, and targetBranch are required for compare-branches action');
+                }
+                
+                const sourceBranchContext = generateContext(projectContext, branch);
+                const targetBranchContext = generateContext(projectContext, targetBranch);
+                
+                const compareResult = await session.executeRead(tx =>
+                    tx.run(`
+                        // Get functions from source branch
+                        OPTIONAL MATCH (sf:Function {context: $sourceContext})
+                        WITH collect({name: sf.name, type: 'Function'}) as sourceFunctions
+                        
+                        // Get functions from target branch
+                        OPTIONAL MATCH (tf:Function {context: $targetContext})
+                        WITH sourceFunctions, collect({name: tf.name, type: 'Function'}) as targetFunctions
+                        
+                        // Get classes from source branch
+                        OPTIONAL MATCH (sc:Class {context: $sourceContext})
+                        WITH sourceFunctions, targetFunctions, collect({name: sc.name, type: 'Class'}) as sourceClasses
+                        
+                        // Get classes from target branch
+                        OPTIONAL MATCH (tc:Class {context: $targetContext})
+                        WITH sourceFunctions, targetFunctions, sourceClasses, collect({name: tc.name, type: 'Class'}) as targetClasses
+                        
+                        RETURN sourceFunctions, targetFunctions, sourceClasses, targetClasses
+                    `, { sourceContext: sourceBranchContext, targetContext: targetBranchContext })
+                );
+                
+                const record = compareResult.records[0];
+                const sourceFunctions = record.get('sourceFunctions') || [];
+                const targetFunctions = record.get('targetFunctions') || [];
+                const sourceClasses = record.get('sourceClasses') || [];
+                const targetClasses = record.get('targetClasses') || [];
+                
+                const sourceElements = [...sourceFunctions, ...sourceClasses];
+                const targetElements = [...targetFunctions, ...targetClasses];
+                
+                const sourceNames = new Set(sourceElements.map(e => e.name));
+                const targetNames = new Set(targetElements.map(e => e.name));
+                
+                const onlyInSource = sourceElements.filter(e => !targetNames.has(e.name));
+                const onlyInTarget = targetElements.filter(e => !sourceNames.has(e.name));
+                const inBoth = sourceElements.filter(e => targetNames.has(e.name));
+                
+                let comparisonText = `Branch Comparison: ${branch} vs ${targetBranch}\n\n`;
+                comparisonText += `📊 Summary:\n`;
+                comparisonText += `  • ${sourceElements.length} elements in ${branch}\n`;
+                comparisonText += `  • ${targetElements.length} elements in ${targetBranch}\n`;
+                comparisonText += `  • ${inBoth.length} common elements\n`;
+                comparisonText += `  • ${onlyInSource.length} only in ${branch}\n`;
+                comparisonText += `  • ${onlyInTarget.length} only in ${targetBranch}\n\n`;
+                
+                if (onlyInSource.length > 0) {
+                    comparisonText += `🔴 Only in ${branch}:\n`;
+                    onlyInSource.forEach(e => comparisonText += `  • ${e.type}: ${e.name}\n`);
+                    comparisonText += '\n';
+                }
+                
+                if (onlyInTarget.length > 0) {
+                    comparisonText += `🔵 Only in ${targetBranch}:\n`;
+                    onlyInTarget.forEach(e => comparisonText += `  • ${e.type}: ${e.name}\n`);
+                    comparisonText += '\n';
+                }
+                
+                if (inBoth.length > 0) {
+                    comparisonText += `✅ Common elements:\n`;
+                    inBoth.forEach(e => comparisonText += `  • ${e.type}: ${e.name}\n`);
+                }
+                
+                return {
+                    content: [{
+                        type: 'text',
+                        text: comparisonText
                     }]
                 };
                 
