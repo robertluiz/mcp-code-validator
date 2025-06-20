@@ -1,0 +1,1767 @@
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { z } from 'zod';
+import { getDriver, closeDriver } from './neo4j';
+import { parseCode, ReactComponent, ReactHook, NextJsPattern, FrontendElement } from './parser';
+import { parsePackageJsonDependencies, getLibraryAPI, isKnownLibraryMember, getAllLibraryMembers } from './library-apis';
+import dotenv from 'dotenv';
+import { Session } from 'neo4j-driver';
+
+dotenv.config();
+
+const driver = getDriver();
+
+/**
+ * Helper to index all parsed code elements and link them to a parent file node.
+ */
+async function indexParsedCode(session: Session, parsedCode: any, filePath: string, language: string, context: string = 'default') {
+    // Index functions
+    for (const func of parsedCode.functions) {
+        await session.executeWrite(tx =>
+            tx.run(`
+                // Find or create the file node with context
+                MERGE (file:File {path: $filePath, context: $context})
+                // Find or create the function node with context
+                MERGE (func:Function {name: $name, language: $language, context: $context})
+                ON CREATE SET func.body = $body, func.createdAt = timestamp()
+                ON MATCH SET func.body = $body, func.updatedAt = timestamp()
+                // Create a relationship from file to function
+                MERGE (file)-[:CONTAINS]->(func)
+            `, { filePath, name: func.name, language, body: func.body, context })
+        );
+    }
+    
+    // Index classes
+    for (const cls of parsedCode.classes) {
+         await session.executeWrite(tx =>
+            tx.run(`
+                MERGE (file:File {path: $filePath, context: $context})
+                MERGE (c:Class {name: $name, language: $language, context: $context})
+                ON CREATE SET c.body = $body, c.createdAt = timestamp()
+                ON MATCH SET c.body = $body, c.updatedAt = timestamp()
+                MERGE (file)-[:CONTAINS]->(c)
+            `, { filePath, name: cls.name, language, body: cls.body, context })
+        );
+    }
+    
+    // Index React components
+    for (const component of parsedCode.reactComponents || []) {
+        await session.executeWrite(tx =>
+            tx.run(`
+                MERGE (file:File {path: $filePath, context: $context})
+                MERGE (comp:ReactComponent {name: $name, language: $language, context: $context})
+                ON CREATE SET 
+                    comp.type = $type,
+                    comp.props = $props,
+                    comp.hooks = $hooks,
+                    comp.body = $body,
+                    comp.isDefaultExport = $isDefaultExport,
+                    comp.createdAt = timestamp()
+                ON MATCH SET 
+                    comp.type = $type,
+                    comp.props = $props,
+                    comp.hooks = $hooks,
+                    comp.body = $body,
+                    comp.isDefaultExport = $isDefaultExport,
+                    comp.updatedAt = timestamp()
+                MERGE (file)-[:CONTAINS]->(comp)
+            `, { 
+                filePath, 
+                name: component.name, 
+                language, 
+                type: component.type,
+                props: component.props,
+                hooks: component.hooks,
+                body: component.body,
+                isDefaultExport: component.isDefaultExport,
+                context
+            })
+        );
+    }
+    
+    // Index React hooks
+    for (const hook of parsedCode.reactHooks || []) {
+        await session.executeWrite(tx =>
+            tx.run(`
+                MERGE (file:File {path: $filePath, context: $context})
+                MERGE (h:ReactHook {name: $name, type: $type, language: $language, context: $context})
+                ON CREATE SET 
+                    h.dependencies = $dependencies,
+                    h.body = $body,
+                    h.createdAt = timestamp()
+                ON MATCH SET 
+                    h.dependencies = $dependencies,
+                    h.body = $body,
+                    h.updatedAt = timestamp()
+                MERGE (file)-[:USES]->(h)
+            `, { 
+                filePath, 
+                name: hook.name, 
+                type: hook.type,
+                language, 
+                dependencies: hook.dependencies || [],
+                body: hook.body,
+                context
+            })
+        );
+    }
+    
+    // Index Next.js patterns
+    for (const pattern of parsedCode.nextjsPatterns || []) {
+        await session.executeWrite(tx =>
+            tx.run(`
+                MERGE (file:File {path: $filePath, context: $context})
+                MERGE (next:NextJsPattern {name: $name, type: $type, language: $language, context: $context})
+                ON CREATE SET 
+                    next.exports = $exports,
+                    next.body = $body,
+                    next.createdAt = timestamp()
+                ON MATCH SET 
+                    next.exports = $exports,
+                    next.body = $body,
+                    next.updatedAt = timestamp()
+                MERGE (file)-[:IMPLEMENTS]->(next)
+            `, { 
+                filePath, 
+                name: pattern.name, 
+                type: pattern.type,
+                language, 
+                exports: pattern.exports,
+                body: pattern.body,
+                context
+            })
+        );
+    }
+    
+    // Index frontend elements (CSS-in-JS, styled components, etc.)
+    for (const element of parsedCode.frontendElements || []) {
+        await session.executeWrite(tx =>
+            tx.run(`
+                MERGE (file:File {path: $filePath, context: $context})
+                MERGE (fe:FrontendElement {name: $name, type: $type, language: $language, context: $context})
+                ON CREATE SET 
+                    fe.styles = $styles,
+                    fe.body = $body,
+                    fe.createdAt = timestamp()
+                ON MATCH SET 
+                    fe.styles = $styles,
+                    fe.body = $body,
+                    fe.updatedAt = timestamp()
+                MERGE (file)-[:STYLES]->(fe)
+            `, { 
+                filePath, 
+                name: element.name, 
+                type: element.type,
+                language, 
+                styles: element.styles,
+                body: element.body,
+                context
+            })
+        );
+    }
+}
+
+
+
+// Create MCP server instance
+const server = new McpServer({
+    name: 'mcp-code-validator',
+    version: '2.0.0'
+});
+
+// Register indexFile tool
+server.registerTool('indexFile', {
+    title: 'Index Code File',
+    description: 'Parses and indexes entire source code files, including React components, hooks, and Next.js patterns.',
+    inputSchema: {
+        filePath: z.string().describe('The unique path of the file being indexed (e.g., "src/components/Button.tsx").'),
+        content: z.string().describe('The full source code content of the file.'),
+        language: z.string().describe('The programming language of the code (e.g., "typescript", "javascript").'),
+        fileExtension: z.string().optional().describe('File extension to determine parser (ts, tsx, js, jsx). Auto-detected from filePath if not provided.'),
+        context: z.string().optional().describe('Project context/namespace (e.g., "my-app", "backend-api"). Defaults to "default".')
+    }
+}, async ({ filePath, content, language, fileExtension, context = 'default' }) => {
+    const session = driver.session();
+    try {
+        // Auto-detect file extension if not provided
+        const extension = fileExtension || filePath.split('.').pop() || 'ts';
+        
+        const parsedCode = parseCode(content, extension);
+        await indexParsedCode(session, parsedCode, filePath, language, context);
+
+        const summary = {
+            indexedFunctions: parsedCode.functions.length,
+            indexedClasses: parsedCode.classes.length,
+            indexedReactComponents: parsedCode.reactComponents?.length || 0,
+            indexedReactHooks: parsedCode.reactHooks?.length || 0,
+            indexedNextJsPatterns: parsedCode.nextjsPatterns?.length || 0,
+            indexedFrontendElements: parsedCode.frontendElements?.length || 0,
+            indexedImports: parsedCode.imports?.length || 0,
+            indexedExports: parsedCode.exports?.length || 0
+        };
+
+        return {
+            content: [{
+                type: 'text',
+                text: `Successfully indexed file: ${filePath}\n\nSummary:\n- Functions: ${summary.indexedFunctions}\n- Classes: ${summary.indexedClasses}\n- React Components: ${summary.indexedReactComponents}\n- React Hooks: ${summary.indexedReactHooks}\n- Next.js Patterns: ${summary.indexedNextJsPatterns}\n- Frontend Elements: ${summary.indexedFrontendElements}\n- Imports: ${summary.indexedImports}\n- Exports: ${summary.indexedExports}`
+            }]
+        };
+    } catch (error: any) {
+        console.error('Error in indexFile:', error);
+        return {
+            content: [{
+                type: 'text',
+                text: `Failed to index file: ${error.message}`
+            }],
+            isError: true
+        };
+    } finally {
+        await session.close();
+    }
+});
+
+// Register validateCode tool
+server.registerTool('validateCode', {
+    title: 'Validate Code',
+    description: 'Validates new code by checking for the existence of its functions and classes in the Neo4j knowledge graph.',
+    inputSchema: {
+        code: z.string().describe('The new source code snippet to validate.'),
+        language: z.string().describe('The programming language of the code.'),
+        context: z.string().optional().describe('Project context/namespace to validate against. Defaults to "default".')
+    }
+}, async ({ code, language, context = 'default' }) => {
+    const parsedCode = parseCode(code);
+    const validationResults: any[] = [];
+    const session = driver.session();
+
+    try {
+        // Validate functions
+        for (const func of parsedCode.functions) {
+            const result = await session.executeRead(tx =>
+                tx.run('MATCH (f:Function {name: $name, language: $language, context: $context}) RETURN f.body AS body, f.updatedAt as updatedAt', { name: func.name, language, context })
+            );
+            if (result.records.length > 0) {
+                validationResults.push({
+                    elementName: func.name,
+                    elementType: 'Function',
+                    status: 'FOUND',
+                    message: 'A function with this name already exists.',
+                    indexedBody: result.records[0].get('body'),
+                });
+            } else {
+                validationResults.push({
+                    elementName: func.name,
+                    elementType: 'Function',
+                    status: 'NOT_FOUND',
+                    message: 'This function does not exist in the knowledge graph. It might be new or a hallucination.',
+                });
+            }
+        }
+        // NOTE: Could add similar validation for classes here
+
+        const resultsText = validationResults.map(result => 
+            `${result.elementType} "${result.elementName}": ${result.status} - ${result.message}`
+        ).join('\n');
+
+        return {
+            content: [{
+                type: 'text',
+                text: `Validation Results:\n${resultsText}`
+            }]
+        };
+    } catch (error: any) {
+        console.error('Error validating code:', error);
+        return {
+            content: [{
+                type: 'text',
+                text: `Failed to validate code: ${error.message}`
+            }],
+            isError: true
+        };
+    } finally {
+        await session.close();
+    }
+});
+
+// Register indexFunctions tool
+server.registerTool('indexFunctions', {
+    title: 'Index Functions',
+    description: 'Indexes a list of individual functions into Neo4j without requiring a full file context.',
+    inputSchema: {
+        functions: z.array(z.object({
+            name: z.string().describe('The function name'),
+            body: z.string().describe('The function body/implementation'),
+            filePath: z.string().optional().describe('Optional file path where the function belongs')
+        })).describe('Array of functions to index'),
+        language: z.string().describe('The programming language of the functions'),
+        context: z.string().optional().describe('Project context/namespace (e.g., "my-app", "backend-api"). Defaults to "default".')
+    }
+}, async ({ functions, language, context = 'default' }) => {
+    const session = driver.session();
+    try {
+        let indexedCount = 0;
+        
+        for (const func of functions) {
+            await session.executeWrite(tx =>
+                tx.run(`
+                    // Create or update the function node with context
+                    MERGE (f:Function {name: $name, language: $language, context: $context})
+                    ON CREATE SET f.body = $body, f.createdAt = timestamp()
+                    ON MATCH SET f.body = $body, f.updatedAt = timestamp()
+                    // Optionally link to file if filePath is provided
+                    WITH f
+                    CALL {
+                        WITH f
+                        CASE WHEN $filePath IS NOT NULL
+                        THEN 
+                            MERGE (file:File {path: $filePath, context: $context})
+                            MERGE (file)-[:CONTAINS]->(f)
+                        ELSE
+                            RETURN f
+                        END
+                        RETURN f as func
+                    }
+                    RETURN func
+                `, { 
+                    name: func.name, 
+                    language, 
+                    body: func.body,
+                    filePath: func.filePath || null,
+                    context
+                })
+            );
+            indexedCount++;
+        }
+
+        return {
+            content: [{
+                type: 'text',
+                text: `Successfully indexed ${indexedCount} functions in ${language}`
+            }]
+        };
+    } catch (error: any) {
+        console.error('Error in indexFunctions:', error);
+        return {
+            content: [{
+                type: 'text',
+                text: `Failed to index functions: ${error.message}`
+            }],
+            isError: true
+        };
+    } finally {
+        await session.close();
+    }
+});
+
+// Register validateFile tool
+server.registerTool('validateFile', {
+    title: 'Validate File',
+    description: 'Validates an entire file by checking if it exists in the knowledge graph and comparing its functions and classes.',
+    inputSchema: {
+        filePath: z.string().describe('The file path to validate'),
+        content: z.string().describe('The file content to validate against the knowledge graph'),
+        language: z.string().describe('The programming language of the file'),
+        context: z.string().optional().describe('Project context/namespace (e.g., "my-app", "backend-api"). Defaults to "default".')
+    }
+}, async ({ filePath, content, language, context = 'default' }) => {
+    const session = driver.session();
+    try {
+        // Check if file exists in knowledge graph with context
+        const fileResult = await session.executeRead(tx =>
+            tx.run('MATCH (f:File {path: $filePath, context: $context}) RETURN f', { filePath, context })
+        );
+
+        const fileExists = fileResult.records.length > 0;
+        const parsedCode = parseCode(content);
+        const validationResults: any[] = [];
+
+        // Validate functions in the file
+        for (const func of parsedCode.functions) {
+            const funcResult = await session.executeRead(tx =>
+                tx.run(`
+                    MATCH (file:File {path: $filePath, context: $context})-[:CONTAINS]->(f:Function {name: $name, language: $language, context: $context})
+                    RETURN f.body AS body, f.updatedAt as updatedAt
+                `, { filePath, name: func.name, language, context })
+            );
+
+            if (funcResult.records.length > 0) {
+                const existingBody = funcResult.records[0].get('body');
+                const bodyMatches = existingBody === func.body;
+                
+                validationResults.push({
+                    elementName: func.name,
+                    elementType: 'Function',
+                    status: bodyMatches ? 'MATCH' : 'MODIFIED',
+                    message: bodyMatches 
+                        ? 'Function exists and matches exactly'
+                        : 'Function exists but has been modified',
+                    hasChanges: !bodyMatches
+                });
+            } else {
+                validationResults.push({
+                    elementName: func.name,
+                    elementType: 'Function',
+                    status: 'NEW',
+                    message: 'Function is new and not in knowledge graph',
+                    hasChanges: true
+                });
+            }
+        }
+
+        // Validate classes in the file
+        for (const cls of parsedCode.classes) {
+            const clsResult = await session.executeRead(tx =>
+                tx.run(`
+                    MATCH (file:File {path: $filePath, context: $context})-[:CONTAINS]->(c:Class {name: $name, language: $language, context: $context})
+                    RETURN c.body AS body, c.updatedAt as updatedAt
+                `, { filePath, name: cls.name, language, context })
+            );
+
+            if (clsResult.records.length > 0) {
+                const existingBody = clsResult.records[0].get('body');
+                const bodyMatches = existingBody === cls.body;
+                
+                validationResults.push({
+                    elementName: cls.name,
+                    elementType: 'Class',
+                    status: bodyMatches ? 'MATCH' : 'MODIFIED',
+                    message: bodyMatches 
+                        ? 'Class exists and matches exactly'
+                        : 'Class exists but has been modified',
+                    hasChanges: !bodyMatches
+                });
+            } else {
+                validationResults.push({
+                    elementName: cls.name,
+                    elementType: 'Class',
+                    status: 'NEW',
+                    message: 'Class is new and not in knowledge graph',
+                    hasChanges: true
+                });
+            }
+        }
+
+        const summary = {
+            fileExists,
+            totalElements: validationResults.length,
+            newElements: validationResults.filter(r => r.status === 'NEW').length,
+            modifiedElements: validationResults.filter(r => r.status === 'MODIFIED').length,
+            matchingElements: validationResults.filter(r => r.status === 'MATCH').length
+        };
+
+        const resultsText = [
+            `File validation for: ${filePath}`,
+            `File exists in knowledge graph: ${fileExists ? 'Yes' : 'No'}`,
+            `\nSummary:`,
+            `- Total elements: ${summary.totalElements}`,
+            `- New elements: ${summary.newElements}`,
+            `- Modified elements: ${summary.modifiedElements}`,
+            `- Matching elements: ${summary.matchingElements}`,
+            `\nDetailed results:`
+        ].join('\n');
+
+        const detailedResults = validationResults.map(result => 
+            `${result.elementType} "${result.elementName}": ${result.status} - ${result.message}`
+        ).join('\n');
+
+        return {
+            content: [{
+                type: 'text',
+                text: `${resultsText}\n${detailedResults}`
+            }]
+        };
+    } catch (error: any) {
+        console.error('Error validating file:', error);
+        return {
+            content: [{
+                type: 'text',
+                text: `Failed to validate file: ${error.message}`
+            }],
+            isError: true
+        };
+    } finally {
+        await session.close();
+    }
+});
+
+// Register detectHallucinations tool
+server.registerTool('detectHallucinations', {
+    title: 'Detect Code Hallucinations',
+    description: 'Analyzes code to detect potential AI hallucinations by checking for non-existent APIs, impossible patterns, and inconsistencies.',
+    inputSchema: {
+        code: z.string().describe('The code to analyze for hallucinations'),
+        language: z.string().describe('Programming language'),
+        context: z.string().optional().describe('Project context/namespace (e.g., "my-app", "backend-api"). Defaults to "default".'),
+        projectContext: z.object({
+            availableLibraries: z.array(z.string()).optional().describe('List of available libraries/packages'),
+            projectApis: z.array(z.string()).optional().describe('List of project-specific APIs'),
+            allowedPatterns: z.array(z.string()).optional().describe('List of allowed code patterns')
+        }).optional().describe('Context information about the project')
+    }
+}, async ({ code, language, context = 'default', projectContext = {} }) => {
+    const session = driver.session();
+    try {
+        const parsedCode = parseCode(code);
+        const hallucinations: any[] = [];
+        
+        // Check for non-existent functions in knowledge graph
+        for (const func of parsedCode.functions) {
+            const result = await session.executeRead(tx =>
+                tx.run('MATCH (f:Function {name: $name, language: $language, context: $context}) RETURN f.name', { name: func.name, language, context })
+            );
+            
+            if (result.records.length === 0) {
+                // Check if function exists in known library APIs
+                const libResult = await session.executeRead(tx =>
+                    tx.run('MATCH (lf:LibraryFunction {name: $name, context: $context}) RETURN lf.library', { name: func.name, context })
+                );
+                
+                if (libResult.records.length === 0) {
+                    // Check if it's a potentially hallucinated function
+                    const suspiciousPatterns = [
+                        /get.*Api|fetch.*Data|load.*Config/i, // Common hallucinated API patterns
+                        /process.*Request|handle.*Response/i,
+                        /validate.*Schema|parse.*Json/i,
+                        /connect.*Database|query.*Table/i
+                    ];
+                    
+                    const isSuspicious = suspiciousPatterns.some(pattern => 
+                        pattern.test(func.name) || pattern.test(func.body)
+                    );
+                    
+                    if (isSuspicious) {
+                        hallucinations.push({
+                            type: 'SUSPICIOUS_FUNCTION',
+                            element: func.name,
+                            confidence: 0.7,
+                            reason: 'Function uses common hallucination patterns and not found in knowledge graph or library APIs',
+                            suggestion: 'Verify this function exists in your codebase, available libraries, or create it'
+                        });
+                    }
+                }
+            }
+        }
+        
+        // Check for impossible imports/requires
+        const importPatterns = [
+            /import.*from\s+['"`]([^'"`]+)['"`]/g,
+            /require\(['"`]([^'"`]+)['"`]\)/g
+        ];
+        
+        for (const pattern of importPatterns) {
+            let match;
+            while ((match = pattern.exec(code)) !== null) {
+                const importPath = match[1];
+                
+                // First check if it's a known library in our API database
+                const isKnownLibrary = getLibraryAPI(importPath) !== null;
+                
+                if (!isKnownLibrary) {
+                    // Check if library exists in indexed dependencies
+                    const libResult = await session.executeRead(tx =>
+                        tx.run('MATCH (lib:Library {name: $name, context: $context}) RETURN lib', { name: importPath, context })
+                    );
+                    
+                    const isIndexed = libResult.records.length > 0;
+                    
+                    if (!isIndexed) {
+                        // Check against available libraries if provided
+                        if (projectContext.availableLibraries) {
+                            const isAvailable = projectContext.availableLibraries.some(lib => 
+                                importPath.includes(lib) || lib.includes(importPath)
+                            );
+                            
+                            if (!isAvailable) {
+                                hallucinations.push({
+                                    type: 'UNKNOWN_IMPORT',
+                                    element: importPath,
+                                    confidence: 0.8,
+                                    reason: 'Import not found in available libraries list',
+                                    suggestion: `Verify that '${importPath}' is installed and available`
+                                });
+                            }
+                        } else {
+                            // No context provided, mark as unknown
+                            hallucinations.push({
+                                type: 'UNKNOWN_IMPORT',
+                                element: importPath,
+                                confidence: 0.6,
+                                reason: 'Import not found in known library APIs or indexed dependencies',
+                                suggestion: `Library '${importPath}' not recognized. Add to package.json dependencies or verify spelling.`
+                            });
+                        }
+                    }
+                }
+                
+                // Check for common hallucinated packages
+                const commonHallucinations = [
+                    'magic-sdk', 'auto-validator', 'smart-parser',
+                    'ai-helper', 'universal-connector', 'super-utils',
+                    // React/Frontend specific hallucinations
+                    'react-auto-hooks', 'next-magic-router', 'styled-auto',
+                    'chakra-smart', 'tailwind-magic', 'emotion-auto',
+                    'react-super-forms', 'next-super-auth', 'react-magic-state',
+                    'auto-styled-components', 'smart-react-router', 'magic-next-api'
+                ];
+                
+                if (commonHallucinations.some(lib => importPath.includes(lib))) {
+                    hallucinations.push({
+                        type: 'LIKELY_HALLUCINATION',
+                        element: importPath,
+                        confidence: 0.9,
+                        reason: 'Import matches common AI hallucination patterns',
+                        suggestion: `'${importPath}' appears to be a hallucinated package name`
+                    });
+                }
+            }
+        }
+        
+        // Check for inconsistent API usage
+        const apiCallPatterns = [
+            /\w+\.(\w+)\(/g, // method calls
+            /await\s+(\w+)\(/g // async calls
+        ];
+        
+        for (const pattern of apiCallPatterns) {
+            let match;
+            while ((match = pattern.exec(code)) !== null) {
+                const apiCall = match[1];
+                
+                // Check against known project APIs
+                if (projectContext.projectApis && !projectContext.projectApis.includes(apiCall)) {
+                    const result = await session.executeRead(tx =>
+                        tx.run(`
+                            MATCH (f:Function {context: $context}) 
+                            WHERE f.name CONTAINS $apiCall OR f.body CONTAINS $apiCall
+                            RETURN f.name LIMIT 1
+                        `, { apiCall, context })
+                    );
+                    
+                    if (result.records.length === 0) {
+                        hallucinations.push({
+                            type: 'UNKNOWN_API_CALL',
+                            element: apiCall,
+                            confidence: 0.6,
+                            reason: 'API call not found in project codebase',
+                            suggestion: `Verify that '${apiCall}' API exists and is properly implemented`
+                        });
+                    }
+                }
+            }
+        }
+        
+        // Check for React/Next.js specific hallucinations
+        const fileExtension = code.includes('jsx') || code.includes('<') ? 'tsx' : 'ts';
+        const frontendParsedCode = parseCode(code, fileExtension);
+        
+        // Check for hallucinated React hooks
+        for (const hook of frontendParsedCode.reactHooks || []) {
+            // First check if hook exists in React library
+            const isKnownReactHook = isKnownLibraryMember('react', hook.name, 'hook');
+            
+            if (!isKnownReactHook) {
+                // Check if it's indexed as a library hook
+                const libHookResult = await session.executeRead(tx =>
+                    tx.run('MATCH (lh:LibraryHook {name: $name, context: $context}) RETURN lh.library', { name: hook.name, context })
+                );
+                
+                if (libHookResult.records.length === 0) {
+                    const hallucinatedHooks = [
+                        'useAutoState', 'useMagicEffect', 'useSmartCallback',
+                        'useAutoFetch', 'useMagicRouter', 'useSmartAuth',
+                        'useAutoForm', 'useMagicAnimation', 'useSmartData'
+                    ];
+                    
+                    if (hallucinatedHooks.includes(hook.name)) {
+                        hallucinations.push({
+                            type: 'HALLUCINATED_REACT_HOOK',
+                            element: hook.name,
+                            confidence: 0.9,
+                            reason: 'Hook name follows common AI hallucination patterns for React',
+                            suggestion: `'${hook.name}' appears to be a hallucinated React hook. Use standard hooks or verify custom hook exists.`
+                        });
+                    } else if (hook.name.startsWith('use') && hook.name.length > 3) {
+                        // Unknown custom hook
+                        hallucinations.push({
+                            type: 'UNKNOWN_REACT_HOOK',
+                            element: hook.name,
+                            confidence: 0.6,
+                            reason: 'Custom hook not found in project or known libraries',
+                            suggestion: `Hook '${hook.name}' not found. Verify it exists in your codebase or install required library.`
+                        });
+                    }
+                }
+            }
+        }
+        
+        // Check for hallucinated Next.js patterns
+        for (const pattern of frontendParsedCode.nextjsPatterns || []) {
+            const hallucinatedNextPatterns = [
+                'getAutoProps', 'getMagicServerSideProps', 'getSmartStaticProps',
+                'autoGenerateMetadata', 'magicMiddleware', 'smartApiHandler'
+            ];
+            
+            if (hallucinatedNextPatterns.some(p => pattern.name.includes(p) || p.includes(pattern.name))) {
+                hallucinations.push({
+                    type: 'HALLUCINATED_NEXTJS_PATTERN',
+                    element: pattern.name,
+                    confidence: 0.85,
+                    reason: 'Next.js pattern name follows common AI hallucination patterns',
+                    suggestion: `'${pattern.name}' appears to be a hallucinated Next.js pattern. Use standard Next.js APIs.`
+                });
+            }
+        }
+        
+        // Check for hallucinated CSS-in-JS/styled components
+        if (code.includes('styled.') || code.includes('css`')) {
+            const hallucinatedStyledPatterns = [
+                'styled.auto', 'styled.magic', 'styled.smart',
+                'autoStyled', 'magicCss', 'smartTheme'
+            ];
+            
+            for (const styledPattern of hallucinatedStyledPatterns) {
+                if (code.includes(styledPattern)) {
+                    hallucinations.push({
+                        type: 'HALLUCINATED_STYLED_COMPONENT',
+                        element: styledPattern,
+                        confidence: 0.8,
+                        reason: 'Styled component pattern appears to be hallucinated',
+                        suggestion: `'${styledPattern}' is not a real styled-components API. Use standard styled-components syntax.`
+                    });
+                }
+            }
+        }
+        
+        // Check for React component hallucinations
+        for (const component of frontendParsedCode.reactComponents || []) {
+            // Check for impossible component patterns
+            const impossiblePatterns = [
+                /Auto[A-Z]\w+Component/,
+                /Magic[A-Z]\w+/,
+                /Smart[A-Z]\w+Provider/,
+                /Universal[A-Z]\w+/
+            ];
+            
+            const isImpossible = impossiblePatterns.some(pattern => pattern.test(component.name));
+            
+            if (isImpossible) {
+                hallucinations.push({
+                    type: 'HALLUCINATED_REACT_COMPONENT',
+                    element: component.name,
+                    confidence: 0.75,
+                    reason: 'Component name follows impossible/hallucinated patterns',
+                    suggestion: `'${component.name}' appears to be a hallucinated component name. Use conventional React component naming.`
+                });
+            }
+        }
+        
+        // Analyze confidence and generate summary
+        const highConfidenceHallucinations = hallucinations.filter(h => h.confidence >= 0.8);
+        const mediumConfidenceHallucinations = hallucinations.filter(h => h.confidence >= 0.6 && h.confidence < 0.8);
+        
+        const summary = {
+            totalHallucinations: hallucinations.length,
+            highConfidence: highConfidenceHallucinations.length,
+            mediumConfidence: mediumConfidenceHallucinations.length,
+            riskLevel: hallucinations.length === 0 ? 'LOW' : 
+                      highConfidenceHallucinations.length > 0 ? 'HIGH' : 'MEDIUM'
+        };
+        
+        const reportText = [
+            `Hallucination Detection Report:`,
+            `Risk Level: ${summary.riskLevel}`,
+            `Total Issues: ${summary.totalHallucinations}`,
+            `High Confidence: ${summary.highConfidence}`,
+            `Medium Confidence: ${summary.mediumConfidence}`,
+            ``,
+            `Detailed Analysis:`
+        ].join('\n');
+        
+        const detailedResults = hallucinations.map(h => 
+            `${h.type}: "${h.element}" (${Math.round(h.confidence * 100)}% confidence)
+  Reason: ${h.reason}
+  Suggestion: ${h.suggestion}`
+        ).join('\n\n');
+        
+        return {
+            content: [{
+                type: 'text',
+                text: hallucinations.length > 0 
+                    ? `${reportText}\n\n${detailedResults}`
+                    : 'No potential hallucinations detected. Code appears consistent with knowledge graph.'
+            }]
+        };
+    } catch (error: any) {
+        console.error('Error in detectHallucinations:', error);
+        return {
+            content: [{
+                type: 'text',
+                text: `Failed to analyze hallucinations: ${error.message}`
+            }],
+            isError: true
+        };
+    } finally {
+        await session.close();
+    }
+});
+
+// Register validateCodeQuality tool
+server.registerTool('validateCodeQuality', {
+    title: 'Validate Code Quality',
+    description: 'Analyzes code quality against established patterns in the knowledge graph and detects potential issues.',
+    inputSchema: {
+        code: z.string().describe('Code to analyze for quality issues'),
+        language: z.string().describe('Programming language'),
+        checkTypes: z.array(z.enum(['naming', 'structure', 'complexity', 'patterns', 'security'])).optional().describe('Types of quality checks to perform'),
+        context: z.string().optional().describe('Project context/namespace (e.g., "my-app", "backend-api"). Defaults to "default".')
+    }
+}, async ({ code, language, checkTypes = ['naming', 'structure', 'complexity', 'patterns'], context = 'default' }) => {
+    const session = driver.session();
+    try {
+        const parsedCode = parseCode(code);
+        const qualityIssues: any[] = [];
+        
+        // Naming Convention Analysis
+        if (checkTypes.includes('naming')) {
+            // Get naming patterns from knowledge graph
+            const namingResult = await session.executeRead(tx =>
+                tx.run(`
+                    MATCH (f:Function {language: $language, context: $context})
+                    RETURN f.name as name
+                    ORDER BY f.createdAt DESC
+                    LIMIT 100
+                `, { language, context })
+            );
+            
+            const existingNames = namingResult.records.map(r => r.get('name'));
+            
+            for (const func of parsedCode.functions) {
+                // Check naming conventions
+                const isSnakeCase = /^[a-z][a-z0-9_]*$/.test(func.name);
+                const isCamelCase = /^[a-z][a-zA-Z0-9]*$/.test(func.name);
+                const isPascalCase = /^[A-Z][a-zA-Z0-9]*$/.test(func.name);
+                
+                // Determine project naming pattern
+                const projectUsesSnakeCase = existingNames.filter(name => /^[a-z][a-z0-9_]*$/.test(name)).length;
+                const projectUsesCamelCase = existingNames.filter(name => /^[a-z][a-zA-Z0-9]*$/.test(name)).length;
+                
+                const expectedPattern = projectUsesCamelCase > projectUsesSnakeCase ? 'camelCase' : 'snake_case';
+                const followsPattern = expectedPattern === 'camelCase' ? isCamelCase : isSnakeCase;
+                
+                if (!followsPattern) {
+                    qualityIssues.push({
+                        type: 'NAMING_CONVENTION',
+                        element: func.name,
+                        severity: 'MEDIUM',
+                        message: `Function name doesn't follow project's ${expectedPattern} convention`,
+                        suggestion: `Consider renaming to follow ${expectedPattern} pattern`
+                    });
+                }
+            }
+        }
+        
+        // Structural Analysis
+        if (checkTypes.includes('structure')) {
+            for (const func of parsedCode.functions) {
+                // Check function length
+                const lineCount = func.body.split('\n').length;
+                if (lineCount > 50) {
+                    qualityIssues.push({
+                        type: 'FUNCTION_TOO_LONG',
+                        element: func.name,
+                        severity: 'HIGH',
+                        message: `Function has ${lineCount} lines, exceeding recommended 50 lines`,
+                        suggestion: 'Consider breaking this function into smaller, more focused functions'
+                    });
+                }
+                
+                // Check for deeply nested code
+                const nestingLevel = (func.body.match(/{/g) || []).length;
+                if (nestingLevel > 4) {
+                    qualityIssues.push({
+                        type: 'DEEP_NESTING',
+                        element: func.name,
+                        severity: 'MEDIUM',
+                        message: `Function has deep nesting (${nestingLevel} levels)`,
+                        suggestion: 'Consider refactoring to reduce nesting complexity'
+                    });
+                }
+            }
+        }
+        
+        // Pattern Analysis
+        if (checkTypes.includes('patterns')) {
+            // Check for common anti-patterns
+            const antiPatterns = [
+                { pattern: /console\.log/g, message: 'Debug console.log statements found', severity: 'LOW' },
+                { pattern: /debugger;/g, message: 'Debugger statements found', severity: 'MEDIUM' },
+                { pattern: /eval\(/g, message: 'Dangerous eval() usage found', severity: 'HIGH' },
+                { pattern: /document\.write/g, message: 'Deprecated document.write usage', severity: 'MEDIUM' }
+            ];
+            
+            for (const antiPattern of antiPatterns) {
+                const matches = code.match(antiPattern.pattern);
+                if (matches) {
+                    qualityIssues.push({
+                        type: 'ANTI_PATTERN',
+                        element: matches[0],
+                        severity: antiPattern.severity,
+                        message: antiPattern.message,
+                        suggestion: 'Remove or replace with better alternatives'
+                    });
+                }
+            }
+        }
+        
+        // Security Analysis
+        if (checkTypes.includes('security')) {
+            const securityPatterns = [
+                { pattern: /password\s*=\s*['"`][^'"`]+['"`]/gi, message: 'Hard-coded password detected' },
+                { pattern: /api_key\s*=\s*['"`][^'"`]+['"`]/gi, message: 'Hard-coded API key detected' },
+                { pattern: /innerHTML\s*=/gi, message: 'Potential XSS vulnerability with innerHTML' },
+                { pattern: /document\.cookie/gi, message: 'Direct cookie manipulation detected' }
+            ];
+            
+            for (const secPattern of securityPatterns) {
+                const matches = code.match(secPattern.pattern);
+                if (matches) {
+                    qualityIssues.push({
+                        type: 'SECURITY_ISSUE',
+                        element: matches[0],
+                        severity: 'HIGH',
+                        message: secPattern.message,
+                        suggestion: 'Review and fix security vulnerability'
+                    });
+                }
+            }
+        }
+        
+        // Generate quality score
+        const highSeverityCount = qualityIssues.filter(i => i.severity === 'HIGH').length;
+        const mediumSeverityCount = qualityIssues.filter(i => i.severity === 'MEDIUM').length;
+        const lowSeverityCount = qualityIssues.filter(i => i.severity === 'LOW').length;
+        
+        const qualityScore = Math.max(0, 100 - (highSeverityCount * 20 + mediumSeverityCount * 10 + lowSeverityCount * 5));
+        
+        const summary = {
+            qualityScore,
+            totalIssues: qualityIssues.length,
+            highSeverity: highSeverityCount,
+            mediumSeverity: mediumSeverityCount,
+            lowSeverity: lowSeverityCount,
+            grade: qualityScore >= 90 ? 'A' : qualityScore >= 80 ? 'B' : qualityScore >= 70 ? 'C' : qualityScore >= 60 ? 'D' : 'F'
+        };
+        
+        const reportText = [
+            `Code Quality Analysis Report:`,
+            `Quality Score: ${summary.qualityScore}/100 (Grade: ${summary.grade})`,
+            `Total Issues: ${summary.totalIssues}`,
+            `High Severity: ${summary.highSeverity}`,
+            `Medium Severity: ${summary.mediumSeverity}`,
+            `Low Severity: ${summary.lowSeverity}`,
+            ``,
+            `Issues Found:`
+        ].join('\n');
+        
+        const detailedIssues = qualityIssues.map(issue => 
+            `${issue.severity}: ${issue.type}
+  Element: ${issue.element}
+  Message: ${issue.message}
+  Suggestion: ${issue.suggestion}`
+        ).join('\n\n');
+        
+        return {
+            content: [{
+                type: 'text',
+                text: qualityIssues.length > 0 
+                    ? `${reportText}\n\n${detailedIssues}`
+                    : `Code Quality Analysis: ${summary.qualityScore}/100 (Grade: ${summary.grade})\nNo issues found!`
+            }]
+        };
+    } catch (error: any) {
+        console.error('Error in validateCodeQuality:', error);
+        return {
+            content: [{
+                type: 'text',
+                text: `Failed to analyze code quality: ${error.message}`
+            }],
+            isError: true
+        };
+    } finally {
+        await session.close();
+    }
+});
+
+// Register suggestImprovements tool
+server.registerTool('suggestImprovements', {
+    title: 'Suggest Code Improvements',
+    description: 'Analyzes code against knowledge graph patterns to suggest improvements and best practices.',
+    inputSchema: {
+        code: z.string().describe('Code to analyze for improvements'),
+        language: z.string().describe('Programming language'),
+        focusAreas: z.array(z.enum(['performance', 'readability', 'maintainability', 'consistency'])).optional().describe('Areas to focus improvement suggestions on'),
+        context: z.string().optional().describe('Project context/namespace (e.g., "my-app", "backend-api"). Defaults to "default".')
+    }
+}, async ({ code, language, focusAreas = ['performance', 'readability', 'maintainability', 'consistency'], context = 'default' }) => {
+    const session = driver.session();
+    try {
+        const parsedCode = parseCode(code);
+        const suggestions: any[] = [];
+        
+        // Get similar patterns from knowledge graph
+        for (const func of parsedCode.functions) {
+            const similarFunctions = await session.executeRead(tx =>
+                tx.run(`
+                    MATCH (f:Function {language: $language, context: $context})
+                    WHERE f.name CONTAINS $namePart OR $namePart CONTAINS f.name
+                    RETURN f.name, f.body, f.updatedAt
+                    ORDER BY f.updatedAt DESC
+                    LIMIT 10
+                `, { language, namePart: func.name.substring(0, Math.min(func.name.length, 5)), context })
+            );
+            
+            if (similarFunctions.records.length > 0) {
+                const patterns = similarFunctions.records.map(r => ({
+                    name: r.get('name'),
+                    body: r.get('body')
+                }));
+                
+                // Analyze patterns for suggestions
+                if (focusAreas.includes('consistency')) {
+                    // Check error handling patterns
+                    const hasErrorHandling = func.body.includes('try') || func.body.includes('catch');
+                    const patternsWithErrorHandling = patterns.filter(p => 
+                        p.body.includes('try') || p.body.includes('catch')
+                    ).length;
+                    
+                    if (!hasErrorHandling && patternsWithErrorHandling > patterns.length / 2) {
+                        suggestions.push({
+                            type: 'ERROR_HANDLING',
+                            element: func.name,
+                            priority: 'MEDIUM',
+                            message: 'Similar functions in codebase use error handling',
+                            suggestion: 'Consider adding try-catch blocks for error handling consistency',
+                            example: 'try { /* your code */ } catch (error) { /* handle error */ }'
+                        });
+                    }
+                }
+                
+                if (focusAreas.includes('performance')) {
+                    // Check for async patterns
+                    const isAsync = func.body.includes('await') || func.body.includes('Promise');
+                    const patternsWithAsync = patterns.filter(p => 
+                        p.body.includes('await') || p.body.includes('Promise')
+                    ).length;
+                    
+                    if (!isAsync && patternsWithAsync > patterns.length / 2 && func.body.length > 100) {
+                        suggestions.push({
+                            type: 'ASYNC_PATTERN',
+                            element: func.name,
+                            priority: 'HIGH',
+                            message: 'Similar functions use async patterns for better performance',
+                            suggestion: 'Consider making this function async if it performs I/O operations',
+                            example: 'async function ' + func.name + '() { await someOperation(); }'
+                        });
+                    }
+                }
+            }
+        }
+        
+        // Readability improvements
+        if (focusAreas.includes('readability')) {
+            for (const func of parsedCode.functions) {
+                // Check for magic numbers
+                const magicNumbers = func.body.match(/\b\d{2,}\b/g);
+                if (magicNumbers && magicNumbers.length > 2) {
+                    suggestions.push({
+                        type: 'MAGIC_NUMBERS',
+                        element: func.name,
+                        priority: 'LOW',
+                        message: 'Function contains magic numbers',
+                        suggestion: 'Consider extracting numbers into named constants',
+                        example: 'const MAX_RETRIES = 3; const TIMEOUT_MS = 5000;'
+                    });
+                }
+                
+                // Check for long parameter lists
+                const paramMatch = func.body.match(/function\s+\w+\s*\(([^)]*)\)/);
+                if (paramMatch) {
+                    const paramCount = paramMatch[1] ? paramMatch[1].split(',').length : 0;
+                    if (paramCount > 4) {
+                        suggestions.push({
+                            type: 'TOO_MANY_PARAMETERS',
+                            element: func.name,
+                            priority: 'MEDIUM',
+                            message: `Function has ${paramCount} parameters`,
+                            suggestion: 'Consider using an options object to group related parameters',
+                            example: 'function myFunc(options) { const { param1, param2, param3 } = options; }'
+                        });
+                    }
+                }
+            }
+        }
+        
+        // Maintainability improvements
+        if (focusAreas.includes('maintainability')) {
+            // Check for code duplication patterns
+            const allFunctionBodies = await session.executeRead(tx =>
+                tx.run(`
+                    MATCH (f:Function {language: $language, context: $context})
+                    RETURN f.body
+                    LIMIT 50
+                `, { language, context })
+            );
+            
+            const existingBodies = allFunctionBodies.records.map(r => r.get('body'));
+            
+            for (const func of parsedCode.functions) {
+                const similarBodies = existingBodies.filter(body => {
+                    const similarity = calculateSimilarity(func.body, body);
+                    return similarity > 0.7 && similarity < 1.0;
+                });
+                
+                if (similarBodies.length > 0) {
+                    suggestions.push({
+                        type: 'CODE_DUPLICATION',
+                        element: func.name,
+                        priority: 'HIGH',
+                        message: 'Similar code patterns found in codebase',
+                        suggestion: 'Consider extracting common logic into a shared utility function',
+                        example: 'Extract common patterns into reusable functions'
+                    });
+                }
+            }
+        }
+        
+        const summary = {
+            totalSuggestions: suggestions.length,
+            highPriority: suggestions.filter(s => s.priority === 'HIGH').length,
+            mediumPriority: suggestions.filter(s => s.priority === 'MEDIUM').length,
+            lowPriority: suggestions.filter(s => s.priority === 'LOW').length
+        };
+        
+        const reportText = [
+            `Code Improvement Suggestions:`,
+            `Total Suggestions: ${summary.totalSuggestions}`,
+            `High Priority: ${summary.highPriority}`,
+            `Medium Priority: ${summary.mediumPriority}`,
+            `Low Priority: ${summary.lowPriority}`,
+            ``,
+            `Detailed Suggestions:`
+        ].join('\n');
+        
+        const detailedSuggestions = suggestions.map(s => 
+            `${s.priority}: ${s.type}
+  Function: ${s.element}
+  Message: ${s.message}
+  Suggestion: ${s.suggestion}
+  Example: ${s.example}`
+        ).join('\n\n');
+        
+        return {
+            content: [{
+                type: 'text',
+                text: suggestions.length > 0 
+                    ? `${reportText}\n\n${detailedSuggestions}`
+                    : 'No improvement suggestions found. Code follows established patterns well!'
+            }]
+        };
+    } catch (error: any) {
+        console.error('Error in suggestImprovements:', error);
+        return {
+            content: [{
+                type: 'text',
+                text: `Failed to generate suggestions: ${error.message}`
+            }],
+            isError: true
+        };
+    } finally {
+        await session.close();
+    }
+});
+
+// Register validateReactHooks tool
+server.registerTool('validateReactHooks', {
+    title: 'Validate React Hooks Usage',
+    description: 'Validates React hooks usage against best practices and detects potential issues with hook dependencies and rules.',
+    inputSchema: {
+        code: z.string().describe('React component code to analyze for hooks usage'),
+        language: z.string().describe('Programming language (typescript/javascript)'),
+        fileExtension: z.string().optional().describe('File extension (tsx/jsx/ts/js)'),
+        context: z.string().optional().describe('Project context/namespace (e.g., "my-app", "backend-api"). Defaults to "default".')
+    }
+}, async ({ code, language, fileExtension, context = 'default' }) => {
+    const session = driver.session();
+    try {
+        const extension = fileExtension || (language === 'typescript' ? 'tsx' : 'jsx');
+        const parsedCode = parseCode(code, extension);
+        const hookIssues: any[] = [];
+        
+        // Validate each React hook usage
+        for (const hook of parsedCode.reactHooks || []) {
+            // Check for common hook issues
+            if (hook.type === 'effect') {
+                // useEffect validation
+                if (hook.dependencies && hook.dependencies.length === 0) {
+                    const hasStateUpdate = hook.body.includes('set') && 
+                                         (hook.body.includes('State') || hook.body.includes('useState'));
+                    
+                    if (hasStateUpdate) {
+                        hookIssues.push({
+                            type: 'MISSING_DEPENDENCY',
+                            hook: hook.name,
+                            severity: 'HIGH',
+                            message: 'useEffect with empty dependency array but contains state updates',
+                            suggestion: 'Add state setters to dependency array or ensure effect should only run once'
+                        });
+                    }
+                }
+                
+                // Check for missing cleanup
+                if (hook.body.includes('setInterval') || hook.body.includes('setTimeout') || 
+                    hook.body.includes('addEventListener')) {
+                    const hasCleanup = hook.body.includes('return') && 
+                                     (hook.body.includes('clear') || hook.body.includes('remove'));
+                    
+                    if (!hasCleanup) {
+                        hookIssues.push({
+                            type: 'MISSING_CLEANUP',
+                            hook: hook.name,
+                            severity: 'MEDIUM',
+                            message: 'useEffect contains side effects but no cleanup function',
+                            suggestion: 'Add cleanup function to prevent memory leaks'
+                        });
+                    }
+                }
+            }
+            
+            if (hook.type === 'callback' || hook.type === 'memo') {
+                // useCallback/useMemo validation
+                if (!hook.dependencies || hook.dependencies.length === 0) {
+                    hookIssues.push({
+                        type: 'UNNECESSARY_MEMOIZATION',
+                        hook: hook.name,
+                        severity: 'LOW',
+                        message: `${hook.name} with empty dependency array - consider if memoization is necessary`,
+                        suggestion: 'Remove memoization if dependencies never change, or add proper dependencies'
+                    });
+                }
+            }
+            
+            // Check for custom hooks following naming convention
+            if (hook.type === 'custom') {
+                if (!hook.name.startsWith('use') || hook.name.length <= 3) {
+                    hookIssues.push({
+                        type: 'INVALID_HOOK_NAME',
+                        hook: hook.name,
+                        severity: 'HIGH',
+                        message: 'Custom hook name must start with "use" and be descriptive',
+                        suggestion: 'Rename hook to follow React hook naming convention'
+                    });
+                }
+            }
+        }
+        
+        // Check for hooks called conditionally (Rules of Hooks violation)
+        const codeLines = code.split('\n');
+        const hookCallsInConditions: any[] = [];
+        
+        codeLines.forEach((line, index) => {
+            const hasHookCall = /use[A-Z]\w*\(/.test(line);
+            const inCondition = /\s*(if|for|while|switch|&&|\|\|)\s*/.test(line) || 
+                               line.trim().startsWith('if') || 
+                               line.trim().startsWith('for') ||
+                               line.trim().startsWith('while');
+            
+            if (hasHookCall && inCondition) {
+                const hookMatch = line.match(/use[A-Z]\w*/);
+                if (hookMatch) {
+                    hookCallsInConditions.push({
+                        hook: hookMatch[0],
+                        line: index + 1,
+                        code: line.trim()
+                    });
+                }
+            }
+        });
+        
+        for (const violation of hookCallsInConditions) {
+            hookIssues.push({
+                type: 'RULES_OF_HOOKS_VIOLATION',
+                hook: violation.hook,
+                severity: 'HIGH',
+                message: `Hook called conditionally on line ${violation.line}`,
+                suggestion: 'Move hook call to top level of component - hooks must be called in the same order every time',
+                location: `Line ${violation.line}: ${violation.code}`
+            });
+        }
+        
+        // Check hooks against knowledge graph for validation
+        for (const hook of parsedCode.reactHooks || []) {
+            if (hook.type === 'custom') {
+                const result = await session.executeRead(tx =>
+                    tx.run('MATCH (h:ReactHook {name: $name, language: $language, context: $context}) RETURN h', 
+                           { name: hook.name, language, context })
+                );
+                
+                if (result.records.length === 0) {
+                    hookIssues.push({
+                        type: 'UNKNOWN_CUSTOM_HOOK',
+                        hook: hook.name,
+                        severity: 'MEDIUM',
+                        message: 'Custom hook not found in knowledge graph',
+                        suggestion: 'Verify custom hook is properly defined or imported'
+                    });
+                }
+            }
+        }
+        
+        const summary = {
+            totalHooks: parsedCode.reactHooks?.length || 0,
+            totalIssues: hookIssues.length,
+            highSeverity: hookIssues.filter(i => i.severity === 'HIGH').length,
+            mediumSeverity: hookIssues.filter(i => i.severity === 'MEDIUM').length,
+            lowSeverity: hookIssues.filter(i => i.severity === 'LOW').length
+        };
+        
+        const reportText = [
+            `React Hooks Validation Report:`,
+            `Total Hooks: ${summary.totalHooks}`,
+            `Total Issues: ${summary.totalIssues}`,
+            `High Severity: ${summary.highSeverity}`,
+            `Medium Severity: ${summary.mediumSeverity}`,
+            `Low Severity: ${summary.lowSeverity}`,
+            ``,
+            `Issues Found:`
+        ].join('\n');
+        
+        const detailedIssues = hookIssues.map(issue => 
+            `${issue.severity}: ${issue.type}
+  Hook: ${issue.hook}
+  Message: ${issue.message}
+  Suggestion: ${issue.suggestion}${issue.location ? '\n  Location: ' + issue.location : ''}`
+        ).join('\n\n');
+        
+        return {
+            content: [{
+                type: 'text',
+                text: hookIssues.length > 0 
+                    ? `${reportText}\n\n${detailedIssues}`
+                    : `React Hooks Validation: All ${summary.totalHooks} hooks follow best practices!`
+            }]
+        };
+    } catch (error: any) {
+        console.error('Error in validateReactHooks:', error);
+        return {
+            content: [{
+                type: 'text',
+                text: `Failed to validate React hooks: ${error.message}`
+            }],
+            isError: true
+        };
+    } finally {
+        await session.close();
+    }
+});
+
+// Register indexDependencies tool
+server.registerTool('indexDependencies', {
+    title: 'Index Package Dependencies',
+    description: 'Indexes known APIs and functions from package.json dependencies to improve validation accuracy.',
+    inputSchema: {
+        packageJsonContent: z.string().describe('Content of package.json file'),
+        projectPath: z.string().optional().describe('Optional project path for context'),
+        context: z.string().optional().describe('Project context/namespace (e.g., "my-app", "backend-api"). Defaults to "default".')
+    }
+}, async ({ packageJsonContent, projectPath, context = 'default' }) => {
+    const session = driver.session();
+    try {
+        const dependencies = parsePackageJsonDependencies(packageJsonContent);
+        let indexedLibraries = 0;
+        let indexedAPIs = 0;
+        const unsupportedLibraries: string[] = [];
+        
+        for (const libName of dependencies) {
+            const api = getLibraryAPI(libName);
+            if (api) {
+                indexedLibraries++;
+                
+                // Index library node with context
+                await session.executeWrite(tx =>
+                    tx.run(`
+                        MERGE (lib:Library {name: $name, context: $context})
+                        ON CREATE SET 
+                            lib.version = $version,
+                            lib.indexedAt = timestamp(),
+                            lib.projectPath = $projectPath
+                        ON MATCH SET 
+                            lib.version = $version,
+                            lib.updatedAt = timestamp(),
+                            lib.projectPath = $projectPath
+                    `, { 
+                        name: api.name,
+                        version: api.version || 'unknown',
+                        projectPath: projectPath || 'unknown',
+                        context
+                    })
+                );
+                
+                // Index functions with context
+                for (const funcName of api.functions) {
+                    await session.executeWrite(tx =>
+                        tx.run(`
+                            MERGE (lib:Library {name: $libName, context: $context})
+                            MERGE (func:LibraryFunction {name: $funcName, library: $libName, context: $context})
+                            ON CREATE SET 
+                                func.type = 'function',
+                                func.createdAt = timestamp()
+                            ON MATCH SET 
+                                func.updatedAt = timestamp()
+                            MERGE (lib)-[:PROVIDES]->(func)
+                        `, { libName: api.name, funcName, context })
+                    );
+                    indexedAPIs++;
+                }
+                
+                // Index classes with context
+                for (const className of api.classes) {
+                    await session.executeWrite(tx =>
+                        tx.run(`
+                            MERGE (lib:Library {name: $libName, context: $context})
+                            MERGE (cls:LibraryClass {name: $className, library: $libName, context: $context})
+                            ON CREATE SET 
+                                cls.type = 'class',
+                                cls.createdAt = timestamp()
+                            ON MATCH SET 
+                                cls.updatedAt = timestamp()
+                            MERGE (lib)-[:PROVIDES]->(cls)
+                        `, { libName: api.name, className, context })
+                    );
+                    indexedAPIs++;
+                }
+                
+                // Index constants with context
+                for (const constName of api.constants) {
+                    await session.executeWrite(tx =>
+                        tx.run(`
+                            MERGE (lib:Library {name: $libName, context: $context})
+                            MERGE (const:LibraryConstant {name: $constName, library: $libName, context: $context})
+                            ON CREATE SET 
+                                const.type = 'constant',
+                                const.createdAt = timestamp()
+                            ON MATCH SET 
+                                const.updatedAt = timestamp()
+                            MERGE (lib)-[:PROVIDES]->(const)
+                        `, { libName: api.name, constName, context })
+                    );
+                    indexedAPIs++;
+                }
+                
+                // Index hooks (React specific) with context
+                if (api.hooks) {
+                    for (const hookName of api.hooks) {
+                        await session.executeWrite(tx =>
+                            tx.run(`
+                                MERGE (lib:Library {name: $libName, context: $context})
+                                MERGE (hook:LibraryHook {name: $hookName, library: $libName, context: $context})
+                                ON CREATE SET 
+                                    hook.type = 'hook',
+                                    hook.createdAt = timestamp()
+                                ON MATCH SET 
+                                    hook.updatedAt = timestamp()
+                                MERGE (lib)-[:PROVIDES]->(hook)
+                            `, { libName: api.name, hookName, context })
+                        );
+                        indexedAPIs++;
+                    }
+                }
+                
+                // Index types with context
+                for (const typeName of api.types) {
+                    await session.executeWrite(tx =>
+                        tx.run(`
+                            MERGE (lib:Library {name: $libName, context: $context})
+                            MERGE (type:LibraryType {name: $typeName, library: $libName, context: $context})
+                            ON CREATE SET 
+                                type.type = 'type',
+                                type.createdAt = timestamp()
+                            ON MATCH SET 
+                                type.updatedAt = timestamp()
+                            MERGE (lib)-[:PROVIDES]->(type)
+                        `, { libName: api.name, typeName, context })
+                    );
+                    indexedAPIs++;
+                }
+            } else {
+                unsupportedLibraries.push(libName);
+            }
+        }
+        
+        const summary = {
+            totalDependencies: dependencies.length,
+            indexedLibraries,
+            indexedAPIs,
+            unsupportedLibraries: unsupportedLibraries.length
+        };
+        
+        const reportText = [
+            `Dependency Indexing Complete:`,
+            `Total Dependencies: ${summary.totalDependencies}`,
+            `Indexed Libraries: ${summary.indexedLibraries}`,
+            `Indexed API Elements: ${summary.indexedAPIs}`,
+            `Unsupported Libraries: ${summary.unsupportedLibraries}`,
+            ``
+        ].join('\n');
+        
+        const supportedLibs = dependencies.filter(lib => getLibraryAPI(lib));
+        const supportedText = supportedLibs.length > 0 
+            ? `Supported Libraries:\n${supportedLibs.map(lib => `- ${lib}`).join('\n')}\n\n`
+            : '';
+        
+        const unsupportedText = unsupportedLibraries.length > 0 
+            ? `Unsupported Libraries (APIs not in database):\n${unsupportedLibraries.map(lib => `- ${lib}`).join('\n')}`
+            : '';
+        
+        return {
+            content: [{
+                type: 'text',
+                text: `${reportText}${supportedText}${unsupportedText}`
+            }]
+        };
+    } catch (error: any) {
+        console.error('Error in indexDependencies:', error);
+        return {
+            content: [{
+                type: 'text',
+                text: `Failed to index dependencies: ${error.message}`
+            }],
+            isError: true
+        };
+    } finally {
+        await session.close();
+    }
+});
+
+// Register context management tool
+server.registerTool('manageContexts', {
+    title: 'Manage Project Contexts',
+    description: 'List, create, or delete project contexts in the Neo4j database.',
+    inputSchema: {
+        action: z.enum(['list', 'create', 'delete', 'clear']).describe('Action to perform: list all contexts, create new context, delete context, or clear context data.'),
+        context: z.string().optional().describe('Context name (required for create/delete/clear actions).')
+    }
+}, async ({ action, context }) => {
+    const session = driver.session();
+    try {
+        switch (action) {
+            case 'list':
+                const listResult = await session.executeRead(tx =>
+                    tx.run(`
+                        MATCH (n) 
+                        WHERE n.context IS NOT NULL 
+                        WITH DISTINCT n.context as context, 
+                             count{(f:Function {context: n.context})} as functions,
+                             count{(c:Class {context: n.context})} as classes,
+                             count{(rc:ReactComponent {context: n.context})} as components,
+                             count{(file:File {context: n.context})} as files
+                        RETURN context, functions, classes, components, files
+                        ORDER BY context
+                    `)
+                );
+                
+                if (listResult.records.length === 0) {
+                    return {
+                        content: [{
+                            type: 'text',
+                            text: 'No contexts found in the database.'
+                        }]
+                    };
+                }
+                
+                const contexts = listResult.records.map(record => ({
+                    context: record.get('context'),
+                    functions: record.get('functions').toNumber(),
+                    classes: record.get('classes').toNumber(),
+                    components: record.get('components').toNumber(),
+                    files: record.get('files').toNumber()
+                }));
+                
+                const contextList = contexts.map(ctx => 
+                    `📁 ${ctx.context}: ${ctx.files} files, ${ctx.functions} functions, ${ctx.classes} classes, ${ctx.components} components`
+                ).join('\n');
+                
+                return {
+                    content: [{
+                        type: 'text',
+                        text: `Available Contexts:\n\n${contextList}\n\nTotal: ${contexts.length} contexts`
+                    }]
+                };
+                
+            case 'create':
+                if (!context) {
+                    throw new Error('Context name is required for create action');
+                }
+                
+                // Check if context already exists
+                const existsResult = await session.executeRead(tx =>
+                    tx.run('MATCH (n {context: $context}) RETURN count(n) as count', { context })
+                );
+                
+                const count = existsResult.records[0].get('count').toNumber();
+                if (count > 0) {
+                    return {
+                        content: [{
+                            type: 'text',
+                            text: `Context "${context}" already exists with ${count} nodes.`
+                        }]
+                    };
+                }
+                
+                return {
+                    content: [{
+                        type: 'text',
+                        text: `Context "${context}" is ready for use. Start indexing files with this context to populate it.`
+                    }]
+                };
+                
+            case 'delete':
+                if (!context) {
+                    throw new Error('Context name is required for delete action');
+                }
+                
+                const deleteResult = await session.executeWrite(tx =>
+                    tx.run('MATCH (n {context: $context}) DETACH DELETE n RETURN count(n) as deleted', { context })
+                );
+                
+                const deleted = deleteResult.records[0].get('deleted').toNumber();
+                
+                return {
+                    content: [{
+                        type: 'text',
+                        text: `Deleted context "${context}" and ${deleted} associated nodes.`
+                    }]
+                };
+                
+            case 'clear':
+                if (!context) {
+                    throw new Error('Context name is required for clear action');
+                }
+                
+                const clearResult = await session.executeWrite(tx =>
+                    tx.run('MATCH (n {context: $context}) DETACH DELETE n RETURN count(n) as cleared', { context })
+                );
+                
+                const cleared = clearResult.records[0].get('cleared').toNumber();
+                
+                return {
+                    content: [{
+                        type: 'text',
+                        text: `Cleared ${cleared} nodes from context "${context}".`
+                    }]
+                };
+                
+            default:
+                throw new Error(`Unknown action: ${action}`);
+        }
+    } catch (error: any) {
+        console.error('Error in manageContexts:', error);
+        return {
+            content: [{
+                type: 'text',
+                text: `Failed to ${action} context: ${error.message}`
+            }],
+            isError: true
+        };
+    } finally {
+        await session.close();
+    }
+});
+
+// Helper function to calculate text similarity
+function calculateSimilarity(str1: string, str2: string): number {
+    const tokens1 = str1.toLowerCase().split(/\W+/).filter(t => t.length > 2);
+    const tokens2 = str2.toLowerCase().split(/\W+/).filter(t => t.length > 2);
+    
+    const intersection = tokens1.filter(token => tokens2.includes(token));
+    const union = [...new Set([...tokens1, ...tokens2])];
+    
+    return intersection.length / union.length;
+}
+
+// Start server
+async function main() {
+    console.log('🔧 Initializing MCP Code Validator...');
+    console.log('Environment:', {
+        NODE_ENV: process.env.NODE_ENV,
+        NEO4J_URI: process.env.NEO4J_URI,
+        NEO4J_USER: process.env.NEO4J_USER
+    });
+    
+    // Test Neo4j connection first
+    try {
+        const testSession = driver.session();
+        await testSession.run('RETURN 1');
+        await testSession.close();
+        console.log('✅ Neo4j connection verified');
+    } catch (error) {
+        console.error('❌ Neo4j connection failed:', error);
+        process.exit(1);
+    }
+    
+    const transport = new StdioServerTransport();
+    
+    // Add error handlers for transport
+    transport.onclose = () => {
+        console.log('📡 Transport connection closed');
+        closeDriver();
+    };
+    
+    transport.onerror = (error) => {
+        console.error('❌ Transport error:', error);
+        closeDriver();
+    };
+    
+    // Handle graceful shutdown
+    process.on('SIGINT', async () => {
+        console.log('\n🛑 Gracefully shutting down...');
+        await closeDriver();
+        process.exit(0);
+    });
+    
+    process.on('SIGTERM', async () => {
+        console.log('\n🛑 SIGTERM received, shutting down...');
+        await closeDriver();
+        process.exit(0);
+    });
+    
+    process.on('uncaughtException', async (error) => {
+        console.error('💥 Uncaught exception:', error);
+        await closeDriver();
+        process.exit(1);
+    });
+    
+    process.on('unhandledRejection', async (reason, promise) => {
+        console.error('💥 Unhandled rejection at:', promise, 'reason:', reason);
+        await closeDriver();
+        process.exit(1);
+    });
+
+    try {
+        console.log('🚀 Starting MCP server...');
+        await server.connect(transport);
+        console.log('✅ MCP Code Validator server started successfully');
+        console.log('📋 Available tools: indexFile, indexFunctions, indexDependencies, validateCode, validateFile, detectHallucinations, validateCodeQuality, suggestImprovements, validateReactHooks, manageContexts');
+        console.log('🎯 Server ready for connections...');
+    } catch (error: any) {
+        console.error('❌ Failed to start MCP server:', error);
+        console.error('Error details:', {
+            message: error?.message || 'Unknown error',
+            stack: error?.stack || 'No stack trace',
+            name: error?.name || 'Unknown'
+        });
+        await closeDriver();
+        process.exit(1);
+    }
+}
+
+main();

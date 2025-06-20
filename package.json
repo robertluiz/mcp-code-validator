@@ -1,0 +1,43 @@
+{
+    "name": "mcp-code-validator",
+    "version": "2.0.0",
+    "description": "Advanced MCP server to index and validate code using an AST parser and Neo4j.",
+    "main": "dist/server.js",
+    "scripts": {
+        "start": "bun run src/server.ts",
+        "start:node": "ts-node src/server.ts",
+        "build": "tsc",
+        "serve": "bun dist/server.js",
+        "serve:node": "node dist/server.js",
+        "test": "jest --config config/jest.config.js",
+        "test:watch": "jest --config config/jest.config.js --watch",
+        "test:coverage": "jest --config config/jest.config.js --coverage"
+    },
+    "keywords": [
+        "mcp",
+        "ai",
+        "neo4j",
+        "rag",
+        "typescript",
+        "ast"
+    ],
+    "author": "",
+    "license": "ISC",
+    "dependencies": {
+        "@modelcontextprotocol/sdk": "^1.13.0",
+        "dotenv": "^16.4.5",
+        "neo4j-driver": "^5.22.0",
+        "tree-sitter": "^0.21.1",
+        "tree-sitter-javascript": "^0.23.1",
+        "tree-sitter-typescript": "^0.23.2",
+        "zod": "^3.22.4"
+    },
+    "devDependencies": {
+        "@types/jest": "^29.5.12",
+        "@types/node": "^20.14.2",
+        "jest": "^29.7.0",
+        "ts-jest": "^29.1.2",
+        "ts-node": "^10.9.2",
+        "typescript": "^5.4.5"
+    }
+}
