@@ -14,14 +14,14 @@ $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $RootDir = Split-Path -Parent $ScriptDir
 
 # Configuration - adjust path based on where script is run from
-if (Test-Path "$ScriptDir/../docker/docker-compose.yml") {
+if (Test-Path "$ScriptDir/../docker/docker compose.yml") {
     # Running from scripts directory
-    $COMPOSE_FILE = "$ScriptDir/../docker/docker-compose.yml"
-} elseif (Test-Path "docker/docker-compose.yml") {
+    $COMPOSE_FILE = "$ScriptDir/../docker/docker compose.yml"
+} elseif (Test-Path "docker/docker compose.yml") {
     # Running from root directory
-    $COMPOSE_FILE = "docker/docker-compose.yml"
+    $COMPOSE_FILE = "docker/docker compose.yml"
 } else {
-    Write-Host "Error: docker-compose.yml not found. Please run from project root or scripts directory." -ForegroundColor Red
+    Write-Host "Error: docker compose.yml not found. Please run from project root or scripts directory." -ForegroundColor Red
     exit 1
 }
 
@@ -55,7 +55,10 @@ function Show-Usage {
 # Check if Docker is running
 function Test-Docker {
     try {
-        docker info | Out-Null
+        $null = docker info 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            throw "Docker command failed"
+        }
     }
     catch {
         Write-ColorOutput Red "❌ Docker is not running. Please start Docker Desktop first."
@@ -66,13 +69,13 @@ function Test-Docker {
 # Start services
 function Start-Services {
     Write-ColorOutput Green "🚀 Starting MCP Code Validator services with Bun..."
-    docker-compose -f $COMPOSE_FILE up -d
+    docker compose -f $COMPOSE_FILE up -d
     
     Write-ColorOutput Yellow "⏳ Waiting for services to be ready..."
     Start-Sleep -Seconds 5
     
     # Wait for Neo4j to be healthy
-    while (-not (docker-compose -f $COMPOSE_FILE ps | Select-String "mcp-neo4j.*healthy")) {
+    while (-not (docker compose -f $COMPOSE_FILE ps | Select-String "mcp-neo4j.*healthy")) {
         Write-Host -NoNewline "."
         Start-Sleep -Seconds 2
     }
@@ -85,7 +88,7 @@ function Start-Services {
 # Stop services
 function Stop-Services {
     Write-ColorOutput Yellow "🛑 Stopping MCP Code Validator services..."
-    docker-compose -f $COMPOSE_FILE down
+    docker compose -f $COMPOSE_FILE down
     Write-ColorOutput Green "✅ Services stopped."
 }
 
@@ -99,26 +102,26 @@ function Restart-Services {
 # Show logs
 function Show-Logs {
     if ($Param -eq "-f") {
-        docker-compose -f $COMPOSE_FILE logs -f
+        docker compose -f $COMPOSE_FILE logs -f
     }
     else {
-        docker-compose -f $COMPOSE_FILE logs --tail=100
+        docker compose -f $COMPOSE_FILE logs --tail=100
     }
 }
 
 # Open shell in container
 function Open-Shell {
     Write-ColorOutput Blue "🐚 Opening shell in MCP Bun container..."
-    docker-compose -f $COMPOSE_FILE exec mcp-server sh
+    docker compose -f $COMPOSE_FILE exec mcp-server sh
 }
 
 # Show status
 function Show-Status {
     Write-ColorOutput Blue "📊 Service Status:"
-    docker-compose -f $COMPOSE_FILE ps
+    docker compose -f $COMPOSE_FILE ps
     Write-Host ""
     Write-ColorOutput Blue "🔍 Service Health:"
-    docker-compose -f $COMPOSE_FILE ps | Select-String "(NAME|health)"
+    docker compose -f $COMPOSE_FILE ps | Select-String "(NAME|health)"
     Write-Host ""
     Write-ColorOutput Blue "🌐 Access URLs:"
     Write-Host "  Neo4j Browser: http://localhost:7474"
@@ -129,7 +132,7 @@ function Show-Status {
 # Clean everything
 function Clean-All {
     Write-ColorOutput Yellow "🧹 Cleaning up Docker resources..."
-    docker-compose -f $COMPOSE_FILE down -v
+    docker compose -f $COMPOSE_FILE down -v
     docker rmi mcp-code-validator:bun 2>$null
     Write-ColorOutput Green "✅ Cleanup complete."
 }
@@ -137,7 +140,7 @@ function Clean-All {
 # Build image
 function Build-Image {
     Write-ColorOutput Yellow "🔨 Building MCP server image with Bun..."
-    docker-compose -f $COMPOSE_FILE build --no-cache mcp-server
+    docker compose -f $COMPOSE_FILE build --no-cache mcp-server
     Write-ColorOutput Green "✅ Build complete."
 }
 
@@ -169,20 +172,20 @@ version: '3.8'
 services:
   mcp-server:
     volumes:
-      - $srcPath:/app/src
-      - $distPath:/app/dist
-      - $packagePath:/app/package.json
-      - $tsconfigPath:/app/tsconfig.json
-      - $bunlockPath:/app/bun.lockb
+      - ${srcPath}:/app/src
+      - ${distPath}:/app/dist
+      - ${packagePath}:/app/package.json
+      - ${tsconfigPath}:/app/tsconfig.json
+      - ${bunlockPath}:/app/bun.lockb
     environment:
       - BUN_ENV=development
       - NODE_ENV=development
     command: ["bun", "run", "start"]
 "@
     
-    $devComposeContent | Out-File -FilePath "docker-compose.bun.dev.yml" -Encoding UTF8
+    $devComposeContent | Out-File -FilePath "docker compose.bun.dev.yml" -Encoding UTF8
     
-    docker-compose -f $COMPOSE_FILE -f docker-compose.bun.dev.yml up
+    docker compose -f $COMPOSE_FILE -f docker compose.bun.dev.yml up
 }
 
 # Main script
