@@ -192,6 +192,7 @@ This MCP server seamlessly integrates with popular AI coding assistants to preve
 
 ### Cursor Integration
 
+#### Local Installation:
 1. **Install as MCP server:**
    ```bash
    npm run build
@@ -211,11 +212,27 @@ This MCP server seamlessly integrates with popular AI coding assistants to preve
    }
    ```
 
-3. **Usage in Cursor:**
-   - Access tools via the MCP interface
-   - Validate code before committing
-   - Get real-time hallucination detection
-   - Receive quality improvement suggestions
+#### Docker Integration (Windows):
+For Docker setup on Windows, see the detailed guide: [docs/CURSOR_WINDOWS_SETUP.md](docs/CURSOR_WINDOWS_SETUP.md)
+
+Quick setup:
+```json
+{
+  "mcp.servers": {
+    "mcp-code-validator": {
+      "command": "C:\\path\\to\\mcp-code-validator\\scripts\\cursor-mcp-wrapper.bat",
+      "args": [],
+      "transport": "stdio"
+    }
+  }
+}
+```
+
+#### Usage in Cursor:
+- Access tools via the MCP interface
+- Validate code before committing
+- Get real-time hallucination detection
+- Receive quality improvement suggestions
 
 ### Windsurf Integration
 
