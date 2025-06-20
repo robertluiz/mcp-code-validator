@@ -9,8 +9,22 @@ param(
     [string]$Param = ""
 )
 
-# Configuration
-$COMPOSE_FILE = "../docker/docker-compose.yml"
+# Get script directory and determine paths
+$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$RootDir = Split-Path -Parent $ScriptDir
+
+# Configuration - adjust path based on where script is run from
+if (Test-Path "$ScriptDir/../docker/docker-compose.yml") {
+    # Running from scripts directory
+    $COMPOSE_FILE = "$ScriptDir/../docker/docker-compose.yml"
+} elseif (Test-Path "docker/docker-compose.yml") {
+    # Running from root directory
+    $COMPOSE_FILE = "docker/docker-compose.yml"
+} else {
+    Write-Host "Error: docker-compose.yml not found. Please run from project root or scripts directory." -ForegroundColor Red
+    exit 1
+}
+
 $PROJECT_NAME = "mcp-code-validator-bun"
 
 # Colors
@@ -131,6 +145,23 @@ function Build-Image {
 function Start-DevMode {
     Write-ColorOutput Yellow "🔧 Starting in development mode with Bun..."
     
+    # Determine volume paths based on current location
+    if ($COMPOSE_FILE -like "*scripts*") {
+        # Running from scripts directory
+        $srcPath = "../src"
+        $distPath = "../dist"
+        $packagePath = "../package.json"
+        $tsconfigPath = "../tsconfig.json"
+        $bunlockPath = "../bun.lockb"
+    } else {
+        # Running from root directory
+        $srcPath = "./src"
+        $distPath = "./dist"
+        $packagePath = "./package.json"
+        $tsconfigPath = "./tsconfig.json"
+        $bunlockPath = "./bun.lockb"
+    }
+    
     # Create a dev override file
     $devComposeContent = @"
 version: '3.8'
@@ -138,11 +169,11 @@ version: '3.8'
 services:
   mcp-server:
     volumes:
-      - ../src:/app/src
-      - ../dist:/app/dist
-      - ../package.json:/app/package.json
-      - ../tsconfig.json:/app/tsconfig.json
-      - ../bun.lockb:/app/bun.lockb
+      - $srcPath:/app/src
+      - $distPath:/app/dist
+      - $packagePath:/app/package.json
+      - $tsconfigPath:/app/tsconfig.json
+      - $bunlockPath:/app/bun.lockb
     environment:
       - BUN_ENV=development
       - NODE_ENV=development

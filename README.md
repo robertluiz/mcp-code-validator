@@ -15,19 +15,26 @@ An advanced Model Context Protocol (MCP) server that indexes and validates TypeS
 
 ### Linux/macOS:
 ```bash
-# Start everything with one command
+# From project root
 ./scripts/docker-manage.sh start
+
+# Or from scripts directory
+cd scripts && ./docker-manage.sh start
 
 # Configure Claude Code (see docs/DOCKER_SETUP.md for details)
 ```
 
 ### Windows:
 ```powershell
-# Using PowerShell
+# From project root (PowerShell)
 .\scripts\docker-manage.ps1 start
 
-# Or using Command Prompt
+# From project root (Command Prompt)
 scripts\docker-manage.bat start
+
+# Or from any directory - scripts auto-detect location
+cd scripts
+.\docker-manage.ps1 start
 
 # Configure Claude Code (see docs/DOCKER_SETUP.md for details)
 ```

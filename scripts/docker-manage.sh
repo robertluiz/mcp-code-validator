@@ -11,8 +11,22 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
 
-# Configuration
-COMPOSE_FILE="../docker/docker-compose.yml"
+# Get script directory and determine paths
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(dirname "$SCRIPT_DIR")"
+
+# Configuration - adjust path based on where script is run from
+if [ -f "$SCRIPT_DIR/../docker/docker-compose.yml" ]; then
+    # Running from scripts directory
+    COMPOSE_FILE="$SCRIPT_DIR/../docker/docker-compose.yml"
+elif [ -f "docker/docker-compose.yml" ]; then
+    # Running from root directory
+    COMPOSE_FILE="docker/docker-compose.yml"
+else
+    print_color "❌ Error: docker-compose.yml not found. Please run from project root or scripts directory." "$RED"
+    exit 1
+fi
+
 PROJECT_NAME="mcp-code-validator-bun"
 
 # Function to print colored output
@@ -126,6 +140,23 @@ build_image() {
 dev_mode() {
     print_color "🔧 Starting in development mode with Bun..." "$YELLOW"
     
+    # Determine volume paths based on current location
+    if [[ "$COMPOSE_FILE" == *"scripts"* ]]; then
+        # Running from scripts directory
+        SRC_PATH="../src"
+        DIST_PATH="../dist"
+        PACKAGE_PATH="../package.json"
+        TSCONFIG_PATH="../tsconfig.json"
+        BUNLOCK_PATH="../bun.lockb"
+    else
+        # Running from root directory
+        SRC_PATH="./src"
+        DIST_PATH="./dist"
+        PACKAGE_PATH="./package.json"
+        TSCONFIG_PATH="./tsconfig.json"
+        BUNLOCK_PATH="./bun.lockb"
+    fi
+    
     # Create a dev override file
     cat > docker-compose.bun.dev.yml << EOF
 version: '3.8'
@@ -133,11 +164,11 @@ version: '3.8'
 services:
   mcp-server:
     volumes:
-      - ./src:/app/src
-      - ./dist:/app/dist
-      - ./package.json:/app/package.json
-      - ./tsconfig.json:/app/tsconfig.json
-      - ./bun.lockb:/app/bun.lockb
+      - $SRC_PATH:/app/src
+      - $DIST_PATH:/app/dist
+      - $PACKAGE_PATH:/app/package.json
+      - $TSCONFIG_PATH:/app/tsconfig.json
+      - $BUNLOCK_PATH:/app/bun.lockb
     environment:
       - BUN_ENV=development
       - NODE_ENV=development

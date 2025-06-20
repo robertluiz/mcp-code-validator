@@ -26,8 +26,8 @@ services:
 
   mcp-server:
     build:
-      context: .
-      dockerfile: Dockerfile
+      context: ..
+      dockerfile: docker/Dockerfile
     image: mcp-code-validator:node
     container_name: mcp-code-validator
     depends_on:
@@ -38,10 +38,10 @@ services:
       - NEO4J_USER=neo4j
       - NEO4J_PASSWORD=password123
       - NODE_ENV=production
-    volumes:
-      # Optional: Mount for development
-      - ../src:/app/src:ro
-      - ../dist:/app/dist:ro
+    # volumes:
+      # Optional: Mount for development (uncomment for dev mode)
+      # - ../src:/app/src:ro
+      # - ../dist:/app/dist:ro
     stdin_open: true
     tty: true
     networks:
