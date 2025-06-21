@@ -4,6 +4,15 @@ import { z } from 'zod';
 import { getDriver, closeDriver } from './neo4j';
 import { parseCode, ReactComponent, ReactHook, NextJsPattern, FrontendElement } from './parser';
 import { parsePackageJsonDependencies, getLibraryAPI, isKnownLibraryMember, getAllLibraryMembers } from './library-apis';
+import { 
+    detectJSHallucinations, 
+    quickValidateJS,
+    npmVerifier,
+    jsAPIValidator,
+    reactHallucinationDetector,
+    vueHallucinationDetector,
+    nodeJSHallucinationDetector
+} from './js-hallucination-detectors';
 import dotenv from 'dotenv';
 import { Session } from 'neo4j-driver';
 
@@ -166,6 +175,138 @@ async function indexParsedCode(session: Session, parsedCode: any, filePath: stri
                 context
             })
         );
+    }
+    
+    // Index imports as relationships
+    for (const importInfo of parsedCode.imports || []) {
+        await session.executeWrite(tx =>
+            tx.run(`
+                MERGE (file:File {path: $filePath, context: $context})
+                MERGE (source:Module {name: $source, context: $context})
+                MERGE (file)-[:IMPORTS {imports: $imports}]->(source)
+            `, { 
+                filePath, 
+                source: importInfo.source,
+                imports: importInfo.imports,
+                context
+            })
+        );
+    }
+    
+    // Index exports as relationships
+    for (const exportInfo of parsedCode.exports || []) {
+        await session.executeWrite(tx =>
+            tx.run(`
+                MERGE (file:File {path: $filePath, context: $context})
+                MERGE (item:ExportedItem {name: $name, type: $type, context: $context})
+                MERGE (file)-[:EXPORTS]->(item)
+            `, { 
+                filePath, 
+                name: exportInfo.name,
+                type: exportInfo.type,
+                context
+            })
+        );
+    }
+    
+    // Analyze and create function call relationships
+    await indexFunctionCallRelationships(session, parsedCode, filePath, context);
+    
+    // Analyze and create class inheritance relationships
+    await indexClassInheritanceRelationships(session, parsedCode, filePath, context);
+}
+
+// Helper function to analyze function calls within code
+async function indexFunctionCallRelationships(session: Session, parsedCode: any, filePath: string, context: string) {
+    for (const func of parsedCode.functions) {
+        // Simple pattern matching for function calls
+        // This could be enhanced with more sophisticated AST analysis
+        const functionCallPattern = /(\w+)\s*\(/g;
+        let match;
+        
+        while ((match = functionCallPattern.exec(func.body)) !== null) {
+            const calledFunction = match[1];
+            
+            // Skip common keywords and built-in functions
+            if (!['if', 'for', 'while', 'return', 'console', 'typeof', 'instanceof'].includes(calledFunction)) {
+                await session.executeWrite(tx =>
+                    tx.run(`
+                        MATCH (caller:Function {name: $callerName, context: $context})
+                        MERGE (called:Function {name: $calledName, context: $context})
+                        MERGE (caller)-[:CALLS]->(called)
+                    `, { 
+                        callerName: func.name,
+                        calledName: calledFunction,
+                        context
+                    })
+                );
+            }
+        }
+        
+        // Check for class instantiation (new ClassName())
+        const classInstantiationPattern = /new\s+(\w+)\s*\(/g;
+        while ((match = classInstantiationPattern.exec(func.body)) !== null) {
+            const className = match[1];
+            
+            await session.executeWrite(tx =>
+                tx.run(`
+                    MATCH (func:Function {name: $functionName, context: $context})
+                    MERGE (cls:Class {name: $className, context: $context})
+                    MERGE (func)-[:INSTANTIATES]->(cls)
+                `, { 
+                    functionName: func.name,
+                    className: className,
+                    context
+                })
+            );
+        }
+    }
+}
+
+// Helper function to analyze class inheritance
+async function indexClassInheritanceRelationships(session: Session, parsedCode: any, filePath: string, context: string) {
+    for (const cls of parsedCode.classes) {
+        // Look for extends keyword in class body
+        const extendsPattern = /class\s+\w+\s+extends\s+(\w+)/i;
+        const match = extendsPattern.exec(cls.body);
+        
+        if (match) {
+            const parentClass = match[1];
+            
+            await session.executeWrite(tx =>
+                tx.run(`
+                    MATCH (child:Class {name: $childName, context: $context})
+                    MERGE (parent:Class {name: $parentName, context: $context})
+                    MERGE (child)-[:EXTENDS]->(parent)
+                `, { 
+                    childName: cls.name,
+                    parentName: parentClass,
+                    context
+                })
+            );
+        }
+        
+        // Look for implements keyword
+        const implementsPattern = /class\s+\w+.*implements\s+([\w,\s]+)/i;
+        const implementsMatch = implementsPattern.exec(cls.body);
+        
+        if (implementsMatch) {
+            const interfaces = implementsMatch[1].split(',').map(i => i.trim());
+            
+            for (const interfaceName of interfaces) {
+                await session.executeWrite(tx =>
+                    tx.run(`
+                        MATCH (cls:Class {name: $className, context: $context})
+                        MERGE (interface:Interface {name: $interfaceName, context: $context})
+                        MERGE (cls)-[:IMPLEMENTS]->(interface)
+                    `, { 
+                        className: cls.name,
+                        interfaceName: interfaceName,
+                        context
+                    })
+                );
+            }
+        }
     }
 }
 
@@ -1896,6 +2037,196 @@ server.registerTool('manageContexts', {
     }
 });
 
+// Register analyzeRelationships tool
+server.registerTool('analyzeRelationships', {
+    title: 'Analyze Code Relationships',
+    description: 'Analyzes and visualizes relationships between code elements (functions, classes, imports, etc.) in the knowledge graph.',
+    inputSchema: {
+        projectContext: z.string().optional().describe('Project context/namespace to analyze. Defaults to "default".'),
+        branch: z.string().optional().describe('Git branch to analyze. Defaults to "main".'),
+        analysisType: z.enum(['all', 'function-calls', 'class-inheritance', 'imports', 'dependencies']).optional().describe('Type of relationship analysis. Defaults to "all".'),
+        elementName: z.string().optional().describe('Specific element name to analyze relationships for'),
+        maxDepth: z.number().optional().describe('Maximum depth for relationship traversal (1-5). Defaults to 2.')
+    }
+}, async ({ projectContext = 'default', branch = 'main', analysisType = 'all', elementName, maxDepth = 2 }) => {
+    const context = generateContext(projectContext, branch);
+    const session = driver.session();
+    
+    try {
+        let relationships: any[] = [];
+        
+        if (analysisType === 'all' || analysisType === 'function-calls') {
+            // Analyze function call relationships
+            const functionCallsResult = await session.executeRead(tx =>
+                tx.run(`
+                    MATCH (caller:Function {context: $context})-[:CALLS]->(called:Function {context: $context})
+                    ${elementName ? 'WHERE caller.name = $elementName OR called.name = $elementName' : ''}
+                    RETURN caller.name as caller, called.name as called, 'CALLS' as relationship
+                `, { context, elementName })
+            );
+            
+            relationships.push(...functionCallsResult.records.map(r => ({
+                from: r.get('caller'),
+                to: r.get('called'),
+                type: r.get('relationship')
+            })));
+        }
+        
+        if (analysisType === 'all' || analysisType === 'class-inheritance') {
+            // Analyze class inheritance relationships
+            const inheritanceResult = await session.executeRead(tx =>
+                tx.run(`
+                    MATCH (child:Class {context: $context})-[:EXTENDS]->(parent:Class {context: $context})
+                    ${elementName ? 'WHERE child.name = $elementName OR parent.name = $elementName' : ''}
+                    RETURN child.name as child, parent.name as parent, 'EXTENDS' as relationship
+                `, { context, elementName })
+            );
+            
+            relationships.push(...inheritanceResult.records.map(r => ({
+                from: r.get('child'),
+                to: r.get('parent'),
+                type: r.get('relationship')
+            })));
+            
+            // Interface implementations
+            const implementsResult = await session.executeRead(tx =>
+                tx.run(`
+                    MATCH (cls:Class {context: $context})-[:IMPLEMENTS]->(interface:Interface {context: $context})
+                    ${elementName ? 'WHERE cls.name = $elementName OR interface.name = $elementName' : ''}
+                    RETURN cls.name as class, interface.name as interface, 'IMPLEMENTS' as relationship
+                `, { context, elementName })
+            );
+            
+            relationships.push(...implementsResult.records.map(r => ({
+                from: r.get('class'),
+                to: r.get('interface'),
+                type: r.get('relationship')
+            })));
+        }
+        
+        if (analysisType === 'all' || analysisType === 'imports') {
+            // Analyze import relationships
+            const importsResult = await session.executeRead(tx =>
+                tx.run(`
+                    MATCH (file:File {context: $context})-[rel:IMPORTS]->(module:Module {context: $context})
+                    RETURN file.path as file, module.name as module, 'IMPORTS' as relationship, rel.imports as imports
+                `, { context })
+            );
+            
+            relationships.push(...importsResult.records.map(r => ({
+                from: r.get('file'),
+                to: r.get('module'),
+                type: r.get('relationship'),
+                details: r.get('imports')
+            })));
+        }
+        
+        if (analysisType === 'all' || analysisType === 'dependencies') {
+            // Analyze instantiation relationships
+            const instantiationResult = await session.executeRead(tx =>
+                tx.run(`
+                    MATCH (func:Function {context: $context})-[:INSTANTIATES]->(cls:Class {context: $context})
+                    ${elementName ? 'WHERE func.name = $elementName OR cls.name = $elementName' : ''}
+                    RETURN func.name as function, cls.name as class, 'INSTANTIATES' as relationship
+                `, { context, elementName })
+            );
+            
+            relationships.push(...instantiationResult.records.map(r => ({
+                from: r.get('function'),
+                to: r.get('class'),
+                type: r.get('relationship')
+            })));
+        }
+        
+        // Get summary statistics
+        const summaryResult = await session.executeRead(tx =>
+            tx.run(`
+                MATCH (n {context: $context})
+                WITH labels(n)[0] as nodeType, count(n) as count
+                RETURN nodeType, count
+                ORDER BY count DESC
+            `, { context })
+        );
+        
+        const summary = summaryResult.records.map(r => ({
+            type: r.get('nodeType'),
+            count: r.get('count').toNumber()
+        }));
+        
+        // Find orphaned elements (no relationships)
+        const orphanedResult = await session.executeRead(tx =>
+            tx.run(`
+                MATCH (n {context: $context})
+                WHERE NOT (n)--()
+                RETURN labels(n)[0] as type, n.name as name
+                LIMIT 10
+            `, { context })
+        );
+        
+        const orphaned = orphanedResult.records.map(r => ({
+            type: r.get('type'),
+            name: r.get('name')
+        }));
+        
+        // Generate relationship report
+        const relationshipsByType = relationships.reduce((acc, rel) => {
+            acc[rel.type] = (acc[rel.type] || 0) + 1;
+            return acc;
+        }, {} as Record<string, number>);
+        
+        const report = [
+            `🔗 Code Relationship Analysis for ${projectContext}:${branch}`,
+            ``,
+            `📊 Summary:`,
+            ...summary.map(s => `  ${s.type}: ${s.count} nodes`),
+            ``,
+            `🔄 Relationships Found:`,
+            ...Object.entries(relationshipsByType).map(([type, count]) => `  ${type}: ${count} relationships`),
+            ``,
+            `🔗 Relationship Details:`
+        ];
+        
+        if (relationships.length > 0) {
+            const relationshipDetails = relationships.slice(0, 20).map(rel => {
+                const details = rel.details ? ` (${Array.isArray(rel.details) ? rel.details.join(', ') : rel.details})` : '';
+                return `  ${rel.from} --[${rel.type}]--> ${rel.to}${details}`;
+            });
+            
+            report.push(...relationshipDetails);
+            
+            if (relationships.length > 20) {
+                report.push(`  ... and ${relationships.length - 20} more relationships`);
+            }
+        } else {
+            report.push('  No relationships found');
+        }
+        
+        if (orphaned.length > 0) {
+            report.push(``, `🏝️ Orphaned Elements (no relationships):`);
+            report.push(...orphaned.map(o => `  ${o.type}: ${o.name}`));
+        }
+        
+        return {
+            content: [{
+                type: 'text',
+                text: report.join('\n')
+            }]
+        };
+        
+    } catch (error: any) {
+        console.error('Error in analyzeRelationships:', error);
+        return {
+            content: [{
+                type: 'text',
+                text: `Failed to analyze relationships: ${error.message}`
+            }],
+            isError: true
+        };
+    } finally {
+        await session.close();
+    }
+});
+
 // Helper function to calculate text similarity
 function calculateSimilarity(str1: string, str2: string): number {
     const tokens1 = str1.toLowerCase().split(/\W+/).filter(t => t.length > 2);
@@ -1906,6 +2237,284 @@ function calculateSimilarity(str1: string, str2: string): number {
     
     return intersection.length / union.length;
 }
+
+// Register comprehensive JavaScript/TypeScript hallucination detection tool
+server.registerTool('detectJSHallucinations', {
+    title: 'Detect JavaScript/TypeScript Hallucinations',
+    description: 'Comprehensive hallucination detection for JavaScript/TypeScript code including npm packages, native APIs, React hooks, Vue composables, and Node.js patterns.',
+    inputSchema: {
+        code: z.string().describe('The JavaScript/TypeScript code to analyze for hallucinations.'),
+        checkPackages: z.boolean().optional().describe('Verify npm package existence (default: true)'),
+        packageNames: z.array(z.string()).optional().describe('Specific package names to verify. Auto-extracted if not provided.'),
+        checkJSAPIs: z.boolean().optional().describe('Validate JavaScript native APIs (default: true)'),
+        environment: z.enum(['browser', 'node', 'both']).optional().describe('Target environment for API validation (default: both)'),
+        esVersion: z.string().optional().describe('ECMAScript version (e.g., "ES2020")'),
+        detectReact: z.boolean().optional().describe('Enable React-specific detection (default: auto-detect)'),
+        reactVersion: z.string().optional().describe('React version for validation'),
+        detectVue: z.boolean().optional().describe('Enable Vue.js-specific detection (default: auto-detect)'),
+        vueVersion: z.enum(['2', '3']).optional().describe('Vue.js version for validation (default: 3)'),
+        detectNodeJS: z.boolean().optional().describe('Enable Node.js-specific detection (default: auto-detect)'),
+        nodeVersion: z.string().optional().describe('Node.js version for validation'),
+        framework: z.enum(['express', 'fastify', 'koa', 'nest']).optional().describe('Backend framework for specific validations'),
+        typescript: z.boolean().optional().describe('Enable TypeScript-specific validations (default: false)'),
+        strictMode: z.boolean().optional().describe('Enable strict validation mode (default: false)')
+    }
+}, async ({ 
+    code, 
+    checkPackages = true, 
+    packageNames, 
+    checkJSAPIs = true, 
+    environment = 'both',
+    esVersion,
+    detectReact,
+    reactVersion,
+    detectVue,
+    vueVersion = '3',
+    detectNodeJS,
+    nodeVersion,
+    framework,
+    typescript = false,
+    strictMode = false 
+}) => {
+    try {
+        const result = await detectJSHallucinations(code, {
+            checkPackages,
+            packageNames,
+            checkJSAPIs,
+            environment,
+            esVersion,
+            detectReact,
+            reactVersion,
+            detectVue,
+            vueVersion,
+            detectNodeJS,
+            nodeVersion,
+            framework,
+            typescript,
+            strictMode
+        });
+
+        const summary = [
+            `🔍 JavaScript/TypeScript Hallucination Analysis`,
+            ``,
+            `📊 Overall Results:`,
+            `  Valid: ${result.overall.valid ? '✅' : '❌'}`,
+            `  Confidence: ${result.overall.confidence.toFixed(1)}%`,
+            `  Risk Score: ${result.overall.riskScore.toFixed(1)}/100`,
+            ``,
+            `📈 Summary:`,
+            `  Total Issues: ${result.summary.totalIssues}`,
+            `  Critical Issues: ${result.summary.criticalIssues}`,
+            ``
+        ];
+
+        // Add package results
+        if (result.packages) {
+            summary.push(
+                `📦 Package Analysis:`,
+                `  Total Packages: ${result.packages.summary.total}`,
+                `  Existing: ${result.packages.summary.existing}`,
+                `  Hallucinated: ${result.packages.summary.hallucinated}`,
+                `  Suspicious: ${result.packages.summary.suspicious}`,
+                ``
+            );
+
+            if (result.packages.summary.hallucinated > 0) {
+                const hallucinatedPkgs = result.packages.packages
+                    .filter(p => !p.exists)
+                    .map(p => `    ❌ ${p.name}${p.alternatives?.length ? ` → Suggested: ${p.alternatives.join(', ')}` : ''}`)
+                    .join('\n');
+                summary.push(`  Hallucinated Packages:\n${hallucinatedPkgs}`, ``);
+            }
+        }
+
+        // Add JavaScript API results
+        if (result.jsAPIs && result.jsAPIs.issues.length > 0) {
+            summary.push(
+                `🔧 JavaScript API Issues:`,
+                ...result.jsAPIs.issues.map(issue => 
+                    `  ${issue.severity === 'error' ? '❌' : '⚠️'} ${issue.message}${issue.suggestion ? ` → ${issue.suggestion}` : ''}`
+                ),
+                ``
+            );
+        }
+
+        // Add React results
+        if (result.react && result.react.issues.length > 0) {
+            summary.push(
+                `⚛️ React Issues:`,
+                ...result.react.issues.map(issue => 
+                    `  ${issue.severity === 'error' ? '❌' : '⚠️'} ${issue.message}${issue.suggestion ? ` → ${issue.suggestion}` : ''}`
+                ),
+                ``
+            );
+        }
+
+        // Add Vue results
+        if (result.vue && result.vue.issues.length > 0) {
+            summary.push(
+                `🟢 Vue.js Issues:`,
+                ...result.vue.issues.map(issue => 
+                    `  ${issue.severity === 'error' ? '❌' : '⚠️'} ${issue.message}${issue.suggestion ? ` → ${issue.suggestion}` : ''}`
+                ),
+                ``
+            );
+        }
+
+        // Add Node.js results
+        if (result.nodejs && result.nodejs.issues.length > 0) {
+            summary.push(
+                `🟢 Node.js Issues:`,
+                ...result.nodejs.issues.map(issue => 
+                    `  ${issue.severity === 'error' ? '❌' : '⚠️'} ${issue.message}${issue.suggestion ? ` → ${issue.suggestion}` : ''}`
+                ),
+                ``
+            );
+        }
+
+        // Add recommendations
+        if (result.summary.suggestions.length > 0) {
+            summary.push(
+                `💡 Recommendations:`,
+                ...result.summary.suggestions.slice(0, 5).map(suggestion => `  • ${suggestion}`),
+                result.summary.suggestions.length > 5 ? `  ... and ${result.summary.suggestions.length - 5} more` : '',
+                ``
+            );
+        }
+
+        return {
+            content: [{
+                type: 'text',
+                text: summary.join('\n')
+            }]
+        };
+
+    } catch (error: any) {
+        console.error('Error in detectJSHallucinations:', error);
+        return {
+            content: [{
+                type: 'text',
+                text: `Failed to analyze JavaScript hallucinations: ${error.message}`
+            }],
+            isError: true
+        };
+    }
+});
+
+// Register quick JavaScript validation tool
+server.registerTool('quickValidateJS', {
+    title: 'Quick JavaScript Validation',
+    description: 'Fast validation for obvious JavaScript/TypeScript hallucinations using pattern matching.',
+    inputSchema: {
+        code: z.string().describe('The JavaScript/TypeScript code to quickly validate.')
+    }
+}, async ({ code }) => {
+    try {
+        const result = quickValidateJS(code);
+
+        const summary = [
+            `⚡ Quick JavaScript Validation`,
+            ``,
+            `Result: ${result.valid ? '✅ Valid' : '❌ Issues Found'}`,
+            `Confidence: ${result.confidence}%`,
+            ``
+        ];
+
+        if (result.issues.length > 0) {
+            summary.push(
+                `🔍 Issues Found:`,
+                ...result.issues.map(issue => `  ❌ ${issue}`),
+                ``
+            );
+        }
+
+        return {
+            content: [{
+                type: 'text',
+                text: summary.join('\n')
+            }]
+        };
+
+    } catch (error: any) {
+        console.error('Error in quickValidateJS:', error);
+        return {
+            content: [{
+                type: 'text',
+                text: `Failed to quick validate JavaScript: ${error.message}`
+            }],
+            isError: true
+        };
+    }
+});
+
+// Register npm package verification tool
+server.registerTool('verifyNpmPackages', {
+    title: 'Verify NPM Packages',
+    description: 'Verify the existence and security of npm packages, detect typosquatting and hallucinated packages.',
+    inputSchema: {
+        packages: z.array(z.string()).describe('Array of package names to verify'),
+        detectTyposquatting: z.boolean().optional().describe('Check for common typos and typosquatting (default: true)')
+    }
+}, async ({ packages, detectTyposquatting = true }) => {
+    try {
+        const result = await npmVerifier.verifyPackages(packages);
+
+        const summary = [
+            `📦 NPM Package Verification`,
+            ``,
+            `📊 Summary:`,
+            `  Total Packages: ${result.summary.total}`,
+            `  Existing: ${result.summary.existing}`,
+            `  Hallucinated: ${result.summary.hallucinated}`,
+            `  Suspicious: ${result.summary.suspicious}`,
+            ``
+        ];
+
+        // Add detailed package results
+        for (const pkg of result.packages) {
+            const status = pkg.exists ? '✅' : '❌';
+            const risk = pkg.security.riskScore > 50 ? ` (Risk: ${pkg.security.riskScore})` : '';
+            
+            summary.push(`${status} ${pkg.name}${risk}`);
+            
+            if (!pkg.exists && pkg.alternatives?.length) {
+                summary.push(`    💡 Alternatives: ${pkg.alternatives.join(', ')}`);
+            }
+            
+            if (pkg.exists && pkg.metadata) {
+                summary.push(`    📈 Downloads: ${pkg.metadata.weeklyDownloads.toLocaleString()}/week`);
+                if (pkg.metadata.deprecated) {
+                    summary.push(`    ⚠️ DEPRECATED`);
+                }
+            }
+        }
+
+        if (result.recommendations.length > 0) {
+            summary.push(
+                ``,
+                `💡 Recommendations:`,
+                ...result.recommendations.map(rec => `  • ${rec}`)
+            );
+        }
+
+        return {
+            content: [{
+                type: 'text',
+                text: summary.join('\n')
+            }]
+        };
+
+    } catch (error: any) {
+        console.error('Error in verifyNpmPackages:', error);
+        return {
+            content: [{
+                type: 'text',
+                text: `Failed to verify npm packages: ${error.message}`
+            }],
+            isError: true
+        };
+    }
+});
 
 // Start server
 async function main() {
@@ -1969,7 +2578,7 @@ async function main() {
         console.log('🚀 Starting MCP server...');
         await server.connect(transport);
         console.log('✅ MCP Code Validator server started successfully');
-        console.log('📋 Available tools: indexFile, indexFunctions, indexDependencies, validateCode, validateFile, detectHallucinations, validateCodeQuality, suggestImprovements, validateReactHooks, manageContexts');
+        console.log('📋 Available tools: indexFile, indexFunctions, indexDependencies, validateCode, validateFile, detectHallucinations, validateCodeQuality, suggestImprovements, validateReactHooks, manageContexts, analyzeRelationships, detectJSHallucinations, quickValidateJS, verifyNpmPackages');
         console.log('🎯 Server ready for connections...');
     } catch (error: any) {
         console.error('❌ Failed to start MCP server:', error);

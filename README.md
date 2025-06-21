@@ -1,10 +1,13 @@
 # MCP Code Validator
 
-An advanced Model Context Protocol (MCP) server that indexes and validates TypeScript/JavaScript code using AST parsing and Neo4j graph database. This tool helps prevent AI code hallucinations and maintain code quality by building a knowledge graph of your codebase.
+An advanced Model Context Protocol (MCP) server that indexes and validates TypeScript/JavaScript code using AST parsing and Neo4j graph database. **Now featuring specialized JavaScript/TypeScript hallucination detection** that validates npm packages, React hooks, Vue composables, and Node.js APIs in real-time to prevent AI coding mistakes.
 
 ## Features
 
+- **🆕 JavaScript/TypeScript Hallucination Detection**: Specialized detection for JS/TS ecosystem including npm packages, React hooks, Vue composables, and Node.js APIs
 - **AI Hallucination Detection**: Prevents AI agents from generating non-existent APIs and impossible code patterns
+- **Real-time Package Verification**: Live npm registry validation with typosquatting detection
+- **Framework-Specific Validation**: Dedicated detectors for React, Vue.js, Node.js, and Express
 - **Code Quality Analysis**: Comprehensive quality scoring with A-F grades and actionable recommendations
 - **Context-Aware Validation**: Validates code against your actual codebase patterns and conventions
 - **AST-based Parsing**: Uses tree-sitter for accurate TypeScript/JavaScript code analysis
@@ -38,6 +41,29 @@ cd scripts
 
 # Configure Claude Code (see docs/DOCKER_SETUP.md for details)
 ```
+
+## 🚀 JavaScript/TypeScript Hallucination Prevention
+
+The MCP Code Validator now includes **specialized hallucination detection** for the JavaScript/TypeScript ecosystem, addressing the most common AI coding mistakes:
+
+### ❌ Common AI Hallucinations Detected:
+- **NPM Packages**: `magic-validator`, `auto-utils`, `ai-helper` (21.7% of AI-recommended packages don't exist)
+- **JavaScript APIs**: `Array.shuffle()`, `Object.isEmpty()`, `String.format()`
+- **React Hooks**: `useAsync()`, `useFetch()`, `usePromise()` 
+- **Vue Composables**: `useStore()`, `useState()`, `useGlobalState()`
+- **Node.js APIs**: `fs.readFileAsync()`, `express.bodyParser()`, `app.middleware()`
+
+### ✅ What Gets Validated:
+- **Real-time NPM Registry**: Verifies package existence and detects typosquatting
+- **Native JavaScript APIs**: Validates against actual browser/Node.js APIs
+- **Framework Patterns**: React hooks, Vue directives, Express middleware
+- **Environment Context**: Browser vs Node.js API compatibility
+- **TypeScript Specifics**: Utility types, decorators, generics
+
+### 🎯 Framework Coverage:
+- **Frontend**: React (hooks, components), Vue.js (composables, directives)
+- **Backend**: Node.js (built-ins), Express (middleware, routing)
+- **Environment**: Browser APIs, Node.js APIs, npm ecosystem
 
 ## Core Indexing & Validation Tools
 
@@ -113,7 +139,76 @@ Analyzes code to detect potential AI hallucinations by checking for non-existent
 - Common hallucinated package names
 - Inconsistent API usage
 
-### 6. `validateCodeQuality`
+## 🆕 JavaScript/TypeScript Hallucination Detection
+
+### 6. `detectJSHallucinations`
+**NEW**: Comprehensive hallucination detection specifically focused on the JavaScript/TypeScript ecosystem.
+
+**Parameters:**
+- `code`: JavaScript/TypeScript code to analyze
+- `checkPackages`: Verify npm package existence (default: true)
+- `packageNames`: Specific packages to verify (auto-extracted if not provided)
+- `checkJSAPIs`: Validate JavaScript native APIs (default: true)
+- `environment`: Target environment - 'browser', 'node', or 'both'
+- `detectReact`: Enable React-specific detection (auto-detect)
+- `detectVue`: Enable Vue.js-specific detection (auto-detect)
+- `detectNodeJS`: Enable Node.js-specific detection (auto-detect)
+- `framework`: Backend framework ('express', 'fastify', 'koa', 'nest')
+- `typescript`: Enable TypeScript-specific validations
+
+**Detects:**
+- **NPM Packages**: Non-existent packages, typosquatting, suspicious patterns
+- **JavaScript APIs**: Hallucinated native methods like `Array.shuffle()`, `Object.isEmpty()`
+- **React Patterns**: Fake hooks (`useAsync`, `useFetch`), invalid APIs (`React.fetch`)
+- **Vue.js Patterns**: Hallucinated composables (`useStore`), invalid directives (`v-hide`)
+- **Node.js APIs**: Non-existent built-ins (`fs.readFileAsync`), incorrect async patterns
+- **Framework APIs**: Express hallucinations (`app.middleware()`), deprecated patterns
+
+**Example:**
+```typescript
+await mcp.callTool('detectJSHallucinations', {
+  code: `
+    import { magicValidator } from 'auto-validator'; // ❌ Hallucinated package
+    import React, { useState } from 'react';
+    
+    function Component() {
+      const data = useAsync(fetchData); // ❌ Fake React hook
+      const items = [1,2,3].shuffle(); // ❌ Non-existent Array method
+      return <div>{data}</div>;
+    }
+  `,
+  detectReact: true,
+  checkPackages: true,
+  environment: 'browser'
+});
+```
+
+### 7. `quickValidateJS`
+**NEW**: Fast validation for obvious JavaScript/TypeScript hallucinations using pattern matching.
+
+**Parameters:**
+- `code`: JavaScript/TypeScript code to quickly validate
+
+**Features:**
+- Ultra-fast pattern-based detection
+- Identifies common hallucination patterns
+- Confidence scoring
+- Minimal overhead for real-time validation
+
+### 8. `verifyNpmPackages`
+**NEW**: Verify npm package existence and detect typosquatting.
+
+**Parameters:**
+- `packages`: Array of package names to verify
+- `detectTyposquatting`: Check for common typos (default: true)
+
+**Features:**
+- Real-time npm registry verification
+- Security risk assessment
+- Alternative package suggestions
+- Popularity and maintenance status
+
+### 9. `validateCodeQuality`
 Comprehensive code quality analysis with scoring system (0-100, A-F grades).
 
 **Parameters:**
@@ -127,7 +222,7 @@ Comprehensive code quality analysis with scoring system (0-100, A-F grades).
 - Anti-patterns and security issues
 - Generates quality score and recommendations
 
-### 7. `suggestImprovements`
+### 10. `suggestImprovements`
 Context-aware suggestions based on existing codebase patterns.
 
 **Parameters:**
@@ -383,12 +478,53 @@ await mcp.callTool('indexFunctions', {
 });
 ```
 
+### JavaScript/TypeScript Hallucination Detection
+
+Detect AI hallucinations specific to the JS/TS ecosystem:
+
+```typescript
+// Comprehensive JS/TS hallucination detection
+await mcp.callTool('detectJSHallucinations', {
+  code: `
+    import { magicValidator } from 'auto-validator'; // ❌ Hallucinated package
+    import React, { useState } from 'react';
+    
+    function Component() {
+      const data = useAsync(fetchData); // ❌ Fake React hook
+      const items = [1,2,3].shuffle(); // ❌ Non-existent Array method
+      const isValid = Object.isEmpty({}); // ❌ Fake Object method
+      
+      return <div>{data}</div>;
+    }
+  `,
+  detectReact: true,
+  checkPackages: true,
+  checkJSAPIs: true,
+  environment: 'browser'
+});
+
+// Quick validation for real-time feedback
+await mcp.callTool('quickValidateJS', {
+  code: `
+    const arr = [1, 2, 3];
+    arr.shuffle(); // ❌ Detected instantly
+    React.fetch('/api'); // ❌ Invalid React API
+  `
+});
+
+// Verify npm packages
+await mcp.callTool('verifyNpmPackages', {
+  packages: ['magic-sdk', 'auto-validator', 'express'], // Only 'express' exists
+  detectTyposquatting: true
+});
+```
+
 ### Real-time AI Code Validation
 
 During development, validate AI-generated code:
 
 ```typescript
-// Detect potential hallucinations
+// General hallucination detection
 await mcp.callTool('detectHallucinations', {
   code: `
     import { magicValidator } from 'auto-utils';
@@ -471,7 +607,26 @@ npm run test:coverage
 
 - **Unit Tests**: Test individual components (parser, neo4j, server tools)
 - **Integration Tests**: Test complete workflows and tool combinations
+- **JavaScript/TypeScript Hallucination Tests**: Comprehensive test suite for JS/TS specific detection
 - **Mocked Dependencies**: Neo4j and external dependencies are mocked for reliable testing
+
+### JavaScript/TypeScript Test Coverage
+
+The new hallucination detection features include extensive testing:
+
+```bash
+# Run JS/TS hallucination detection tests
+npm test -- tests/js-hallucination-detectors.test.ts
+
+# Test coverage includes:
+# - NPM package verification (18 test cases)
+# - JavaScript API validation 
+# - React hooks and patterns detection
+# - Vue.js composables and directives validation
+# - Node.js built-in APIs verification
+# - Express framework patterns
+# - Comprehensive integration scenarios
+```
 
 ## Contributing
 

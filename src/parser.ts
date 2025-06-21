@@ -96,7 +96,8 @@ export function parseCode(code: string, fileExtension: string = 'ts'): ParsedCod
                 node.firstNamedChild.firstNamedChild?.text : 'anonymous');
             const bodyNode = node.childForFieldName('body');
             
-            if (name && bodyNode) {
+            // Skip constructors - they're not regular functions
+            if (name && bodyNode && name !== 'constructor') {
                 functions.push({ name, body: bodyNode.text });
                 
                 // Check if it's a React component
@@ -117,7 +118,8 @@ export function parseCode(code: string, fileExtension: string = 'ts'): ParsedCod
             const nameNode = node.childForFieldName('name');
             const bodyNode = node.childForFieldName('body');
             if (nameNode && bodyNode) {
-                classes.push({ name: nameNode.text, body: bodyNode.text });
+                // Use full class declaration text to capture extends/implements
+                classes.push({ name: nameNode.text, body: node.text });
                 
                 // Check if it's a React class component
                 if (isReactClassComponent(node)) {
@@ -173,20 +175,41 @@ function parseImportStatement(node: Parser.SyntaxNode, imports: { source: string
         const importNames: string[] = [];
         
         if (importClause) {
-            // Extract import names (simplified)
+            // Use regex parsing as fallback for better accuracy
+            const importText = node.text;
+            
+            // Check for default import (import React from 'react')
+            const defaultMatch = importText.match(/import\s+(\w+)\s+from/);
+            if (defaultMatch) {
+                importNames.push(defaultMatch[1]);
+            }
+            
+            // Check for named imports (import { useState, useEffect } from 'react')
+            const namedMatch = importText.match(/import\s*\{\s*([^}]+)\s*\}/);
+            if (namedMatch) {
+                const namedImports = namedMatch[1]
+                    .split(',')
+                    .map(imp => imp.trim())
+                    .filter(imp => imp.length > 0);
+                importNames.push(...namedImports);
+            }
+            
+            // Also try AST parsing as before
             const namedImports = importClause.children.find(child => child.type === 'named_imports');
             if (namedImports) {
                 namedImports.children.forEach(child => {
                     if (child.type === 'import_specifier') {
                         const name = child.children.find(c => c.type === 'identifier');
-                        if (name) importNames.push(name.text);
+                        if (name && !importNames.includes(name.text)) {
+                            importNames.push(name.text);
+                        }
                     }
                 });
             }
             
-            // Check for default import
+            // Check for default import via AST
             const defaultImport = importClause.children.find(child => child.type === 'identifier');
-            if (defaultImport) {
+            if (defaultImport && !importNames.includes(defaultImport.text)) {
                 importNames.push(defaultImport.text);
             }
         }
@@ -196,6 +219,10 @@ function parseImportStatement(node: Parser.SyntaxNode, imports: { source: string
 }
 
 function parseExportStatement(node: Parser.SyntaxNode, exports: { name: string; type: 'default' | 'named' }[]): void {
+    // Use regex parsing for better export detection
+    const exportText = node.text;
+    
+    // Handle export default
     if (node.type === 'export_default_declaration') {
         const declaration = node.children.find(child => 
             child.type === 'function_declaration' || 
@@ -207,15 +234,64 @@ function parseExportStatement(node: Parser.SyntaxNode, exports: { name: string; 
             if (nameNode) {
                 exports.push({ name: nameNode.text, type: 'default' });
             }
+        } else {
+            // Fallback: try regex parsing for export default function
+            const defaultFuncMatch = exportText.match(/export\s+default\s+function\s+(\w+)/);
+            if (defaultFuncMatch) {
+                exports.push({ name: defaultFuncMatch[1], type: 'default' });
+            }
         }
-    } else if (node.type === 'export_statement') {
-        // Handle named exports
+    } 
+    // Handle export function/class statements
+    else if (exportText.startsWith('export function')) {
+        const match = exportText.match(/export\s+function\s+(\w+)/);
+        if (match) {
+            exports.push({ name: match[1], type: 'named' });
+        }
+    }
+    else if (exportText.startsWith('export class')) {
+        const match = exportText.match(/export\s+class\s+(\w+)/);
+        if (match) {
+            exports.push({ name: match[1], type: 'named' });
+        }
+    }
+    // Handle export { name1, name2 } statements and export default
+    else if (node.type === 'export_statement') {
+        // Check if this is a default export (export default function/class)
+        const hasDefault = node.children.some(child => child.type === 'default');
+        if (hasDefault) {
+            const declaration = node.children.find(child => 
+                child.type === 'function_declaration' || 
+                child.type === 'class_declaration'
+            );
+            if (declaration) {
+                const nameNode = declaration.childForFieldName('name');
+                if (nameNode) {
+                    exports.push({ name: nameNode.text, type: 'default' });
+                }
+            }
+        }
         const exportClause = node.children.find(child => child.type === 'export_clause');
         if (exportClause) {
             exportClause.children.forEach(child => {
                 if (child.type === 'export_specifier') {
                     const name = child.children.find(c => c.type === 'identifier');
                     if (name) exports.push({ name: name.text, type: 'named' });
+                }
+            });
+        }
+        
+        // Also try regex parsing for export { } statements
+        const namedMatch = exportText.match(/export\s*\{\s*([^}]+)\s*\}/);
+        if (namedMatch) {
+            const namedExports = namedMatch[1]
+                .split(',')
+                .map(exp => exp.trim())
+                .filter(exp => exp.length > 0);
+            
+            namedExports.forEach(exportName => {
+                if (!exports.some(e => e.name === exportName)) {
+                    exports.push({ name: exportName, type: 'named' });
                 }
             });
         }
