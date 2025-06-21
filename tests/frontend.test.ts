@@ -1,4 +1,17 @@
-import { parseCode, ReactComponent, ReactHook, NextJsPattern, FrontendElement } from '../src/parser';
+// Ensure we're using the real parser implementation
+jest.unmock('../src/parser');
+jest.dontMock('../src/parser');
+
+import type { parseCode as ParseCodeType, ReactComponent, ReactHook, NextJsPattern, FrontendElement } from '../src/parser';
+let parseCode: typeof ParseCodeType;
+
+beforeAll(async () => {
+  jest.resetModules();
+  jest.unmock('../src/parser');
+  jest.dontMock('../src/parser');
+  const parserModule = await import('../src/parser');
+  parseCode = parserModule.parseCode;
+});
 
 describe('Frontend Code Parsing', () => {
   describe('React Components', () => {

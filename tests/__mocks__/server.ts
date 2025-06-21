@@ -1,6 +1,6 @@
 // Mock implementation for server functions with branch support
 // Accept variable number of arguments to support both old and new signatures
-export const indexParsedCode = jest.fn((...args: any[]) => {
+export const indexParsedCode = jest.fn((..._args: any[]) => {
   // Support both old signature (4 params) and new signature (6 params)
   return Promise.resolve(undefined);
 });

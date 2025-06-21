@@ -73,6 +73,11 @@ export function parseCode(code: string, fileExtension: string = 'ts'): ParsedCod
     const exports: { name: string; type: 'default' | 'named' }[] = [];
 
     function traverse(node: Parser.SyntaxNode) {
+        // Safety check
+        if (!node || !node.type) {
+            return;
+        }
+        
         // Parse imports
         if (node.type === 'import_statement') {
             parseImportStatement(node, imports);
@@ -136,12 +141,18 @@ export function parseCode(code: string, fileExtension: string = 'ts'): ParsedCod
             }
         }
 
-        for (const child of node.children) {
-            traverse(child);
+        if (node.children) {
+            for (const child of node.children) {
+                if (child) {
+                    traverse(child);
+                }
+            }
         }
     }
 
-    traverse(tree.rootNode);
+    if (tree && tree.rootNode) {
+        traverse(tree.rootNode);
+    }
     return { 
         functions, 
         classes, 

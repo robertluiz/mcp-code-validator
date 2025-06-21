@@ -1,8 +1,13 @@
+/**
+ * Real parser integration tests - isolated from mocked tests
+ * These tests use the actual parser implementation without any mocks
+ */
+
 import { parseCode } from '../src/parser';
 
-// Integration tests that test the full workflow
-describe('Integration Tests', () => {
-  // Mock Neo4j for integration tests
+// Integration tests that test the full workflow with real parser
+describe('Real Parser Integration Tests', () => {
+  // Mock Neo4j for integration tests (but use real parser)
   const mockSession = {
     close: jest.fn().mockResolvedValue(undefined),
     executeRead: jest.fn(),
