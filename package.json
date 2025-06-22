@@ -28,6 +28,7 @@
         "dotenv": "^16.4.5",
         "neo4j-driver": "^5.22.0",
         "node-fetch": "^2.7.0",
+        "tailwindcss": "^3.4.0",
         "tree-sitter": "^0.21.1",
         "tree-sitter-javascript": "^0.23.1",
         "tree-sitter-typescript": "^0.23.2",

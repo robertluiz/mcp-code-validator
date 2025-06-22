@@ -13,6 +13,10 @@ import {
     vueHallucinationDetector,
     nodeJSHallucinationDetector
 } from './js-hallucination-detectors';
+import { HTMLCoherenceValidator } from './validators/html-coherence-validator';
+import { CSSValidator } from './validators/css-validator';
+import { TailwindValidator } from './validators/tailwind-validator';
+import { HTMLCSSIndexer } from './html-css-indexer';
 import dotenv from 'dotenv';
 import { Session } from 'neo4j-driver';
 
@@ -321,12 +325,12 @@ const server = new McpServer({
 // Register indexFile tool
 server.registerTool('indexFile', {
     title: 'Index Code File',
-    description: 'Parses and indexes entire source code files, including React components, hooks, and Next.js patterns. Supports branch-specific indexing.',
+    description: 'Parses and indexes entire source code files, including HTML, CSS, JavaScript, TypeScript, React components, hooks, and Next.js patterns. Supports branch-specific indexing.',
     inputSchema: {
-        filePath: z.string().describe('The unique path of the file being indexed (e.g., "src/components/Button.tsx").'),
+        filePath: z.string().describe('The unique path of the file being indexed (e.g., "src/components/Button.tsx", "public/index.html", "styles/main.css").'),
         content: z.string().describe('The full source code content of the file.'),
-        language: z.string().describe('The programming language of the code (e.g., "typescript", "javascript").'),
-        fileExtension: z.string().optional().describe('File extension to determine parser (ts, tsx, js, jsx). Auto-detected from filePath if not provided.'),
+        language: z.string().describe('The programming language of the code (e.g., "typescript", "javascript", "html", "css").'),
+        fileExtension: z.string().optional().describe('File extension to determine parser (ts, tsx, js, jsx, html, css, scss, sass). Auto-detected from filePath if not provided.'),
         projectContext: z.string().optional().describe('Project context/namespace (e.g., "my-app", "backend-api"). Defaults to "default".'),
         branch: z.string().optional().describe('Git branch name (e.g., "main", "develop", "feature/auth"). Defaults to "main".'),
         verbose: z.boolean().optional().describe('Return detailed information (default: false)')
@@ -337,6 +341,52 @@ server.registerTool('indexFile', {
         // Auto-detect file extension if not provided
         const extension = fileExtension || filePath.split('.').pop() || 'ts';
         
+        // Handle HTML and CSS files
+        if (['html', 'htm'].includes(extension.toLowerCase())) {
+            const htmlIndexer = new HTMLCSSIndexer();
+            const isJSX = ['jsx', 'tsx'].includes(extension.toLowerCase());
+            const result = await htmlIndexer.indexHTML(session, content, filePath, projectContext, branch, isJSX);
+            
+            if (verbose) {
+                return {
+                    content: [{
+                        type: 'text',
+                        text: `Successfully indexed HTML file: ${filePath}\n\nSummary:\n- HTML Elements: ${result.htmlElements}\n- Relationships: ${result.relationships}\n- Errors: ${result.errors.length ? result.errors.join(', ') : 'None'}`
+                    }]
+                };
+            } else {
+                return {
+                    content: [{
+                        type: 'text',
+                        text: `Indexed ${result.htmlElements} HTML elements from ${filePath}`
+                    }]
+                };
+            }
+        }
+        
+        if (['css', 'scss', 'sass', 'less'].includes(extension.toLowerCase())) {
+            const cssIndexer = new HTMLCSSIndexer();
+            const isStyled = content.includes('styled.') || content.includes('css`');
+            const result = await cssIndexer.indexCSS(session, content, filePath, projectContext, branch, isStyled);
+            
+            if (verbose) {
+                return {
+                    content: [{
+                        type: 'text',
+                        text: `Successfully indexed CSS file: ${filePath}\n\nSummary:\n- CSS Rules: ${result.cssRules}\n- CSS Declarations: ${result.cssDeclarations}\n- Relationships: ${result.relationships}\n- Errors: ${result.errors.length ? result.errors.join(', ') : 'None'}`
+                    }]
+                };
+            } else {
+                return {
+                    content: [{
+                        type: 'text',
+                        text: `Indexed ${result.cssRules} CSS rules and ${result.cssDeclarations} declarations from ${filePath}`
+                    }]
+                };
+            }
+        }
+        
+        // Handle JavaScript/TypeScript files (existing logic)
         const parsedCode = parseCode(content, extension);
         await indexParsedCode(session, parsedCode, filePath, language, projectContext, branch);
 
@@ -2516,6 +2566,698 @@ server.registerTool('verifyNpmPackages', {
     }
 });
 
+// HTML Coherence Validation Tool
+server.registerTool('validateHTML', {
+    title: 'HTML/JSX Coherence Validator',
+    description: 'Validates HTML element structure, attributes, semantic coherence, and accessibility',
+    inputSchema: {
+        html: z.string().describe('HTML or JSX content to validate'),
+        isJSX: z.boolean().optional().describe('Whether the content is JSX (default: false)'),
+        filePath: z.string().optional().describe('Optional file path for context')
+    }
+}, async ({ html, isJSX = false, filePath }) => {
+    try {
+        const validator = new HTMLCoherenceValidator();
+        const result = validator.validateHTML(html, isJSX);
+        
+        const errorCount = result.errors.length;
+        const warningCount = result.warnings.length;
+        const suggestionCount = result.suggestions.length;
+        
+        let responseText = `🔍 HTML/JSX Validation Results${filePath ? ` for ${filePath}` : ''}:\n\n`;
+        responseText += `📊 **Summary:**\n`;
+        responseText += `- Status: ${result.isValid ? '✅ Valid' : '❌ Invalid'}\n`;
+        responseText += `- Score: ${result.score}/100\n`;
+        responseText += `- Errors: ${errorCount}\n`;
+        responseText += `- Warnings: ${warningCount}\n`;
+        responseText += `- Suggestions: ${suggestionCount}\n\n`;
+        
+        if (errorCount > 0) {
+            responseText += `🚨 **Errors:**\n`;
+            result.errors.forEach((error, index) => {
+                responseText += `${index + 1}. [${error.type.toUpperCase()}] Line ${error.line}: ${error.message}\n`;
+                if (error.element) responseText += `   Element: <${error.element}>\n`;
+            });
+            responseText += '\n';
+        }
+        
+        if (warningCount > 0) {
+            responseText += `⚠️ **Warnings:**\n`;
+            result.warnings.forEach((warning, index) => {
+                responseText += `${index + 1}. [${warning.type.toUpperCase()}] Line ${warning.line}: ${warning.message}\n`;
+                if (warning.element) responseText += `   Element: <${warning.element}>\n`;
+            });
+            responseText += '\n';
+        }
+        
+        if (suggestionCount > 0) {
+            responseText += `💡 **Suggestions:**\n`;
+            result.suggestions.forEach((suggestion, index) => {
+                responseText += `${index + 1}. ${suggestion}\n`;
+            });
+            responseText += '\n';
+        }
+        
+        if (result.isValid && errorCount === 0 && warningCount === 0) {
+            responseText += `✨ **Excellent!** Your HTML/JSX follows best practices.\n`;
+        }
+        
+        return {
+            content: [{
+                type: 'text',
+                text: responseText
+            }]
+        };
+    } catch (error: any) {
+        console.error('Error in validateHTML:', error);
+        return {
+            content: [{
+                type: 'text',
+                text: `Failed to validate HTML: ${error.message}`
+            }],
+            isError: true
+        };
+    }
+});
+
+// CSS Validation Tool
+server.registerTool('validateCSS', {
+    title: 'CSS Validator',
+    description: 'Validates CSS syntax, properties, coherence, performance, and maintainability',
+    inputSchema: {
+        css: z.string().describe('CSS content to validate'),
+        isStyled: z.boolean().optional().describe('Whether the CSS is from styled-components (default: false)'),
+        filePath: z.string().optional().describe('Optional file path for context')
+    }
+}, async ({ css, isStyled = false, filePath }) => {
+    try {
+        const validator = new CSSValidator();
+        const result = validator.validateCSS(css, isStyled);
+        
+        const errorCount = result.errors.length;
+        const warningCount = result.warnings.length;
+        const suggestionCount = result.suggestions.length;
+        
+        let responseText = `🎨 CSS Validation Results${filePath ? ` for ${filePath}` : ''}:\n\n`;
+        responseText += `📊 **Summary:**\n`;
+        responseText += `- Status: ${result.isValid ? '✅ Valid' : '❌ Invalid'}\n`;
+        responseText += `- Score: ${result.score}/100\n`;
+        responseText += `- Errors: ${errorCount}\n`;
+        responseText += `- Warnings: ${warningCount}\n`;
+        responseText += `- Suggestions: ${suggestionCount}\n\n`;
+        
+        responseText += `📈 **Metrics:**\n`;
+        responseText += `- Total Rules: ${result.metrics.totalRules}\n`;
+        responseText += `- Total Declarations: ${result.metrics.totalDeclarations}\n`;
+        responseText += `- Average Specificity: ${result.metrics.specificity.average.toFixed(1)}\n`;
+        responseText += `- Max Specificity: ${result.metrics.specificity.max}\n`;
+        responseText += `- Expensive Selectors: ${result.metrics.performance.expensiveSelectors}\n`;
+        responseText += `- Redundant Declarations: ${result.metrics.performance.redundantDeclarations}\n`;
+        responseText += `- Magic Numbers: ${result.metrics.maintainability.magicNumbers}\n`;
+        responseText += `- Hardcoded Colors: ${result.metrics.maintainability.hardcodedColors}\n\n`;
+        
+        if (errorCount > 0) {
+            responseText += `🚨 **Errors:**\n`;
+            result.errors.forEach((error, index) => {
+                responseText += `${index + 1}. [${error.type.toUpperCase()}] Line ${error.line}: ${error.message}\n`;
+                if (error.property) responseText += `   Property: ${error.property}\n`;
+                if (error.selector) responseText += `   Selector: ${error.selector}\n`;
+            });
+            responseText += '\n';
+        }
+        
+        if (warningCount > 0) {
+            responseText += `⚠️ **Warnings:**\n`;
+            result.warnings.forEach((warning, index) => {
+                responseText += `${index + 1}. [${warning.type.toUpperCase()}] Line ${warning.line}: ${warning.message}\n`;
+                if (warning.property) responseText += `   Property: ${warning.property}\n`;
+                if (warning.selector) responseText += `   Selector: ${warning.selector}\n`;
+            });
+            responseText += '\n';
+        }
+        
+        if (suggestionCount > 0) {
+            responseText += `💡 **Suggestions:**\n`;
+            result.suggestions.forEach((suggestion, index) => {
+                responseText += `${index + 1}. ${suggestion}\n`;
+            });
+            responseText += '\n';
+        }
+        
+        if (result.isValid && errorCount === 0 && warningCount === 0) {
+            responseText += `✨ **Excellent!** Your CSS follows best practices.\n`;
+        }
+        
+        return {
+            content: [{
+                type: 'text',
+                text: responseText
+            }]
+        };
+    } catch (error: any) {
+        console.error('Error in validateCSS:', error);
+        return {
+            content: [{
+                type: 'text',
+                text: `Failed to validate CSS: ${error.message}`
+            }],
+            isError: true
+        };
+    }
+});
+
+// HTML/CSS Query Tool
+server.registerTool('queryHTMLCSS', {
+    title: 'Query HTML/CSS Elements',
+    description: 'Query indexed HTML elements and CSS rules with relationship analysis',
+    inputSchema: {
+        queryType: z.enum(['html-elements', 'css-rules', 'style-relationships', 'unused-styles', 'element-styles']).describe('Type of query to perform'),
+        selector: z.string().optional().describe('CSS selector or HTML tag to filter (e.g., ".button", "div", "#header")'),
+        filePath: z.string().optional().describe('Filter by specific file path'),
+        projectContext: z.string().optional().describe('Project context (default: "default")'),
+        branch: z.string().optional().describe('Git branch (default: "main")'),
+        limit: z.number().optional().describe('Maximum number of results (default: 50)')
+    }
+}, async ({ queryType, selector, filePath, projectContext = 'default', branch = 'main', limit = 50 }) => {
+    const session = driver.session();
+    const context = `${projectContext}:${branch}`;
+
+    try {
+        let query = '';
+        let params: any = { context, limit };
+
+        switch (queryType) {
+            case 'html-elements':
+                query = `
+                    MATCH (element:HTMLElement {context: $context})
+                    ${selector ? 'WHERE element.tag = $selector OR $selector IN element.classes' : ''}
+                    ${filePath ? 'AND element.filePath = $filePath' : ''}
+                    RETURN element.tag, element.attributes, element.classes, element.filePath, element.line
+                    ORDER BY element.filePath, element.line
+                    LIMIT $limit
+                `;
+                if (selector) params.selector = selector.replace('.', '').replace('#', '');
+                if (filePath) params.filePath = filePath;
+                break;
+
+            case 'css-rules':
+                query = `
+                    MATCH (rule:CSSRule {context: $context})
+                    ${selector ? 'WHERE rule.selector CONTAINS $selector' : ''}
+                    ${filePath ? 'AND rule.filePath = $filePath' : ''}
+                    OPTIONAL MATCH (rule)-[:HAS_DECLARATION]->(decl:CSSDeclaration)
+                    RETURN rule.selector, rule.specificity, rule.filePath, rule.line, 
+                           collect({property: decl.property, value: decl.value, important: decl.important}) as declarations
+                    ORDER BY rule.specificity DESC, rule.filePath, rule.line
+                    LIMIT $limit
+                `;
+                if (selector) params.selector = selector;
+                if (filePath) params.filePath = filePath;
+                break;
+
+            case 'style-relationships':
+                query = `
+                    MATCH (element:HTMLElement {context: $context})-[rel:STYLED_BY]->(rule:CSSRule {context: $context})
+                    ${selector ? 'WHERE element.tag = $selector OR $selector IN element.classes OR rule.selector CONTAINS $selector' : ''}
+                    RETURN element.tag, element.classes, element.filePath as htmlFile, element.line as htmlLine,
+                           rule.selector, rule.filePath as cssFile, rule.line as cssLine, rel.className
+                    ORDER BY element.filePath, element.line
+                    LIMIT $limit
+                `;
+                if (selector) params.selector = selector.replace('.', '').replace('#', '');
+                break;
+
+            case 'unused-styles':
+                query = `
+                    MATCH (rule:CSSRule {context: $context})
+                    WHERE NOT (rule)<-[:STYLED_BY]-(:HTMLElement)
+                    ${filePath ? 'AND rule.filePath = $filePath' : ''}
+                    OPTIONAL MATCH (rule)-[:HAS_DECLARATION]->(decl:CSSDeclaration)
+                    RETURN rule.selector, rule.filePath, rule.line,
+                           collect({property: decl.property, value: decl.value}) as declarations
+                    ORDER BY rule.filePath, rule.line
+                    LIMIT $limit
+                `;
+                if (filePath) params.filePath = filePath;
+                break;
+
+            case 'element-styles':
+                query = `
+                    MATCH (element:HTMLElement {context: $context})
+                    ${selector ? 'WHERE element.tag = $selector OR $selector IN element.classes' : ''}
+                    OPTIONAL MATCH (element)-[:STYLED_BY]->(rule:CSSRule)
+                    OPTIONAL MATCH (rule)-[:HAS_DECLARATION]->(decl:CSSDeclaration)
+                    RETURN element.tag, element.classes, element.filePath, element.line, element.inlineStyles,
+                           collect(DISTINCT rule.selector) as cssSelectors,
+                           collect({property: decl.property, value: decl.value}) as cssDeclarations
+                    ORDER BY element.filePath, element.line
+                    LIMIT $limit
+                `;
+                if (selector) params.selector = selector.replace('.', '').replace('#', '');
+                break;
+        }
+
+        const result = await session.executeRead(tx => tx.run(query, params));
+        const records = result.records;
+
+        if (records.length === 0) {
+            return {
+                content: [{
+                    type: 'text',
+                    text: `No ${queryType.replace('-', ' ')} found matching the criteria.`
+                }]
+            };
+        }
+
+        let responseText = `🔍 **${queryType.replace('-', ' ').toUpperCase()} Query Results** (${records.length} items):\n\n`;
+
+        records.forEach((record, index) => {
+            responseText += `**${index + 1}.** `;
+            
+            switch (queryType) {
+                case 'html-elements':
+                    const tag = record.get('element.tag');
+                    const attributes = record.get('element.attributes');
+                    const classes = record.get('element.classes') || [];
+                    const htmlFilePath = record.get('element.filePath');
+                    const line = record.get('element.line');
+                    
+                    responseText += `<${tag}${classes.length ? ` class="${classes.join(' ')}"` : ''}\n`;
+                    responseText += `   📍 ${htmlFilePath}:${line}\n`;
+                    if (attributes && attributes !== '{}') {
+                        responseText += `   🏷️  Attributes: ${attributes}\n`;
+                    }
+                    break;
+
+                case 'css-rules':
+                    const selector = record.get('rule.selector');
+                    const specificity = record.get('rule.specificity');
+                    const cssFilePath = record.get('rule.filePath');
+                    const cssLine = record.get('rule.line');
+                    const declarations = record.get('declarations') || [];
+                    
+                    responseText += `${selector} (specificity: ${specificity})\n`;
+                    responseText += `   📍 ${cssFilePath}:${cssLine}\n`;
+                    if (declarations.length > 0) {
+                        responseText += `   🎨 Declarations: ${declarations.map((d: any) => `${d.property}: ${d.value}${d.important ? ' !important' : ''}`).join('; ')}\n`;
+                    }
+                    break;
+
+                case 'style-relationships':
+                    const elementTag = record.get('element.tag');
+                    const elementClasses = record.get('element.classes') || [];
+                    const htmlFile = record.get('htmlFile');
+                    const htmlLineDotd = record.get('htmlLine');
+                    const ruleSelector = record.get('rule.selector');
+                    const cssFile = record.get('cssFile');
+                    const cssLinenum = record.get('cssLine');
+                    const className = record.get('rel.className');
+                    
+                    responseText += `<${elementTag}> ↔ ${ruleSelector}\n`;
+                    responseText += `   📍 HTML: ${htmlFile}:${htmlLineDotd}\n`;
+                    responseText += `   🎨 CSS: ${cssFile}:${cssLinenum}\n`;
+                    if (className) responseText += `   🔗 Via: ${className}\n`;
+                    break;
+
+                case 'unused-styles':
+                    const unusedSelector = record.get('rule.selector');
+                    const unusedFile = record.get('rule.filePath');
+                    const unusedLine = record.get('rule.line');
+                    const unusedDeclarations = record.get('declarations') || [];
+                    
+                    responseText += `${unusedSelector} (unused)\n`;
+                    responseText += `   📍 ${unusedFile}:${unusedLine}\n`;
+                    if (unusedDeclarations.length > 0) {
+                        responseText += `   🎨 ${unusedDeclarations.map((d: any) => `${d.property}: ${d.value}`).join('; ')}\n`;
+                    }
+                    break;
+
+                case 'element-styles':
+                    const elemTag = record.get('element.tag');
+                    const elemClasses = record.get('element.classes') || [];
+                    const elemFile = record.get('element.filePath');
+                    const elemLine = record.get('element.line');
+                    const inlineStyles = record.get('element.inlineStyles');
+                    const cssSelectors = record.get('cssSelectors') || [];
+                    const cssDecls = record.get('cssDeclarations') || [];
+                    
+                    responseText += `<${elemTag}${elemClasses.length ? ` class="${elemClasses.join(' ')}"` : ''}>\n`;
+                    responseText += `   📍 ${elemFile}:${elemLine}\n`;
+                    if (inlineStyles) responseText += `   🎨 Inline: ${inlineStyles}\n`;
+                    if (cssSelectors.length > 0) responseText += `   🎯 CSS Rules: ${cssSelectors.join(', ')}\n`;
+                    break;
+            }
+            
+            responseText += '\n';
+        });
+
+        return {
+            content: [{
+                type: 'text',
+                text: responseText
+            }]
+        };
+
+    } catch (error: any) {
+        console.error('Error in queryHTMLCSS:', error);
+        return {
+            content: [{
+                type: 'text',
+                text: `Failed to query HTML/CSS: ${error.message}`
+            }],
+            isError: true
+        };
+    } finally {
+        await session.close();
+    }
+});
+
+// Tailwind CSS Validation Tool
+server.registerTool('validateTailwind', {
+    title: 'Tailwind CSS Validator',
+    description: 'Validates Tailwind CSS utility classes, detects invalid classes, deprecated patterns, and provides suggestions',
+    inputSchema: {
+        classNames: z.string().describe('Tailwind CSS class names to validate (space or comma separated)'),
+        filePath: z.string().optional().describe('Optional file path for context')
+    }
+}, async ({ classNames, filePath }) => {
+    try {
+        const validator = new TailwindValidator();
+        const result = validator.validateTailwindClasses(classNames, filePath || '');
+        
+        const errorCount = result.errors.length;
+        const warningCount = result.warnings.length;
+        const suggestionCount = result.suggestions.length;
+        
+        let responseText = `🎨 Tailwind CSS Validation Results${filePath ? ` for ${filePath}` : ''}:\n\n`;
+        responseText += `📊 **Summary:**\n`;
+        responseText += `- Status: ${result.isValid ? '✅ Valid' : '❌ Invalid'}\n`;
+        responseText += `- Score: ${result.score}/100\n`;
+        responseText += `- Errors: ${errorCount}\n`;
+        responseText += `- Warnings: ${warningCount}\n`;
+        responseText += `- Suggestions: ${suggestionCount}\n\n`;
+        
+        responseText += `📈 **Metrics:**\n`;
+        responseText += `- Total Classes: ${result.metrics.totalClasses}\n`;
+        responseText += `- Valid Classes: ${result.metrics.validClasses}\n`;
+        responseText += `- Invalid Classes: ${result.metrics.invalidClasses}\n`;
+        responseText += `- Arbitrary Values: ${result.metrics.arbitraryValues}\n`;
+        responseText += `- Custom Classes: ${result.metrics.customClasses}\n`;
+        responseText += `- Responsive Classes: ${result.metrics.responsiveClasses}\n`;
+        responseText += `- State Classes: ${result.metrics.stateClasses}\n`;
+        responseText += `- Duplicate Classes: ${result.metrics.duplicateClasses}\n`;
+        responseText += `- Deprecated Classes: ${result.metrics.deprecatedClasses}\n\n`;
+        
+        if (errorCount > 0) {
+            responseText += `🚨 **Errors:**\n`;
+            result.errors.forEach((error, index) => {
+                responseText += `${index + 1}. [${error.type.toUpperCase()}] Line ${error.line}: ${error.message}\n`;
+                if (error.className) responseText += `   Class: ${error.className}\n`;
+            });
+            responseText += '\n';
+        }
+        
+        if (warningCount > 0) {
+            responseText += `⚠️ **Warnings:**\n`;
+            result.warnings.forEach((warning, index) => {
+                responseText += `${index + 1}. [${warning.type.toUpperCase()}] Line ${warning.line}: ${warning.message}\n`;
+                if (warning.className) responseText += `   Class: ${warning.className}\n`;
+            });
+            responseText += '\n';
+        }
+        
+        if (suggestionCount > 0) {
+            responseText += `💡 **Suggestions:**\n`;
+            result.suggestions.forEach((suggestion, index) => {
+                responseText += `${index + 1}. ${suggestion}\n`;
+            });
+            responseText += '\n';
+        }
+        
+        if (result.isValid && errorCount === 0 && warningCount === 0) {
+            responseText += `✨ **Excellent!** Your Tailwind classes are valid and follow best practices.\n`;
+        }
+        
+        return {
+            content: [{
+                type: 'text',
+                text: responseText
+            }]
+        };
+    } catch (error: any) {
+        console.error('Error in validateTailwind:', error);
+        return {
+            content: [{
+                type: 'text',
+                text: `Failed to validate Tailwind CSS: ${error.message}`
+            }],
+            isError: true
+        };
+    }
+});
+
+// Index HTML/CSS/Tailwind Tool
+server.registerTool('indexHTMLCSS', {
+    title: 'Index HTML/CSS/Tailwind Content',
+    description: 'Index HTML elements, CSS rules, and Tailwind classes in Neo4j database with relationship analysis',
+    inputSchema: {
+        content: z.string().describe('HTML or CSS content to index'),
+        contentType: z.enum(['html', 'css', 'jsx', 'styled-components']).describe('Type of content being indexed'),
+        filePath: z.string().describe('File path for the content'),
+        projectContext: z.string().optional().describe('Project context (default: "default")'),
+        branch: z.string().optional().describe('Git branch (default: "main")')
+    }
+}, async ({ content, contentType, filePath, projectContext = 'default', branch = 'main' }) => {
+    const session = driver.session();
+    try {
+        const indexer = new HTMLCSSIndexer();
+        let result;
+        
+        switch (contentType) {
+            case 'html':
+            case 'jsx':
+                result = await indexer.indexHTML(session, content, filePath, projectContext, branch, contentType === 'jsx');
+                break;
+            case 'css':
+            case 'styled-components':
+                result = await indexer.indexCSS(session, content, filePath, projectContext, branch, contentType === 'styled-components');
+                break;
+            default:
+                throw new Error(`Unsupported content type: ${contentType}`);
+        }
+        
+        let responseText = `📚 HTML/CSS/Tailwind Indexing Results for ${filePath}:\n\n`;
+        responseText += `📊 **Summary:**\n`;
+        responseText += `- HTML Elements: ${result.htmlElements}\n`;
+        responseText += `- CSS Rules: ${result.cssRules}\n`;
+        responseText += `- CSS Declarations: ${result.cssDeclarations}\n`;
+        responseText += `- Tailwind Classes: ${result.tailwindClasses}\n`;
+        responseText += `- Relationships: ${result.relationships}\n`;
+        responseText += `- Errors: ${result.errors.length}\n\n`;
+        
+        if (result.errors.length > 0) {
+            responseText += `🚨 **Errors:**\n`;
+            result.errors.forEach((error, index) => {
+                responseText += `${index + 1}. ${error}\n`;
+            });
+            responseText += '\n';
+        }
+        
+        responseText += `✅ **Indexing completed successfully!**\n`;
+        responseText += `Project: ${projectContext}, Branch: ${branch}\n`;
+        
+        return {
+            content: [{
+                type: 'text',
+                text: responseText
+            }]
+        };
+    } catch (error: any) {
+        console.error('Error in indexHTMLCSS:', error);
+        return {
+            content: [{
+                type: 'text',
+                text: `Failed to index HTML/CSS content: ${error.message}`
+            }],
+            isError: true
+        };
+    } finally {
+        await session.close();
+    }
+});
+
+// Query Tailwind Classes Tool
+server.registerTool('queryTailwindClasses', {
+    title: 'Query Tailwind Classes',
+    description: 'Query indexed Tailwind classes with filtering and analysis capabilities',
+    inputSchema: {
+        queryType: z.enum(['all-classes', 'invalid-classes', 'deprecated-classes', 'arbitrary-values', 'responsive-classes', 'state-classes', 'class-usage']).describe('Type of Tailwind query to perform'),
+        className: z.string().optional().describe('Specific class name to search for'),
+        filePath: z.string().optional().describe('Filter by specific file path'),
+        projectContext: z.string().optional().describe('Project context (default: "default")'),
+        branch: z.string().optional().describe('Git branch (default: "main")'),
+        limit: z.number().optional().describe('Maximum number of results (default: 50)')
+    }
+}, async ({ queryType, className, filePath, projectContext = 'default', branch = 'main', limit = 50 }) => {
+    const session = driver.session();
+    const context = `${projectContext}:${branch}`;
+
+    try {
+        let query = '';
+        let params: any = { context, limit };
+
+        switch (queryType) {
+            case 'all-classes':
+                query = `
+                    MATCH (twClass:TailwindClass {context: $context})
+                    ${className ? 'WHERE twClass.className CONTAINS $className' : ''}
+                    ${filePath ? 'AND twClass.filePath = $filePath' : ''}
+                    RETURN twClass.className, twClass.filePath, twClass.isTailwind, 
+                           twClass.isValid, twClass.isArbitrary, twClass.isResponsive, 
+                           twClass.hasStateModifier
+                    ORDER BY twClass.className
+                    LIMIT $limit
+                `;
+                break;
+
+            case 'invalid-classes':
+                query = `
+                    MATCH (twClass:TailwindClass {context: $context, isValid: false})
+                    ${filePath ? 'WHERE twClass.filePath = $filePath' : ''}
+                    RETURN twClass.className, twClass.filePath, twClass.isTailwind,
+                           twClass.isArbitrary, twClass.isResponsive, twClass.hasStateModifier
+                    ORDER BY twClass.filePath, twClass.className
+                    LIMIT $limit
+                `;
+                break;
+
+            case 'arbitrary-values':
+                query = `
+                    MATCH (twClass:TailwindClass {context: $context, isArbitrary: true})
+                    ${filePath ? 'WHERE twClass.filePath = $filePath' : ''}
+                    RETURN twClass.className, twClass.filePath, twClass.isValid
+                    ORDER BY twClass.filePath, twClass.className
+                    LIMIT $limit
+                `;
+                break;
+
+            case 'responsive-classes':
+                query = `
+                    MATCH (twClass:TailwindClass {context: $context, isResponsive: true})
+                    ${filePath ? 'WHERE twClass.filePath = $filePath' : ''}
+                    RETURN twClass.className, twClass.filePath, twClass.isValid
+                    ORDER BY twClass.filePath, twClass.className
+                    LIMIT $limit
+                `;
+                break;
+
+            case 'state-classes':
+                query = `
+                    MATCH (twClass:TailwindClass {context: $context, hasStateModifier: true})
+                    ${filePath ? 'WHERE twClass.filePath = $filePath' : ''}
+                    RETURN twClass.className, twClass.filePath, twClass.isValid
+                    ORDER BY twClass.filePath, twClass.className
+                    LIMIT $limit
+                `;
+                break;
+
+            case 'class-usage':
+                query = `
+                    MATCH (twClass:TailwindClass {context: $context})<-[:USES_TAILWIND_CLASS]-(element:HTMLElement)
+                    ${className ? 'WHERE twClass.className = $className' : ''}
+                    ${filePath ? 'AND element.filePath = $filePath' : ''}
+                    RETURN twClass.className, element.tag, element.filePath, element.line,
+                           count(*) as usageCount
+                    ORDER BY usageCount DESC, twClass.className
+                    LIMIT $limit
+                `;
+                break;
+        }
+
+        if (className) params.className = className;
+        if (filePath) params.filePath = filePath;
+
+        const result = await session.executeRead(tx => tx.run(query, params));
+        const records = result.records;
+
+        if (records.length === 0) {
+            return {
+                content: [{
+                    type: 'text',
+                    text: `No ${queryType.replace('-', ' ')} found matching the criteria.`
+                }]
+            };
+        }
+
+        let responseText = `🎨 **${queryType.replace('-', ' ').toUpperCase()} Query Results** (${records.length} items):\n\n`;
+
+        records.forEach((record, index) => {
+            responseText += `**${index + 1}.** `;
+            
+            const classNameValue = record.get('twClass.className');
+            const filePathValue = record.get('twClass.filePath') || record.get('element.filePath');
+            
+            switch (queryType) {
+                case 'all-classes':
+                case 'invalid-classes':
+                case 'arbitrary-values':
+                case 'responsive-classes':
+                case 'state-classes':
+                    const isValid = record.get('twClass.isValid');
+                    const isTailwind = record.get('twClass.isTailwind');
+                    const isArbitrary = record.get('twClass.isArbitrary');
+                    const isResponsive = record.get('twClass.isResponsive');
+                    const hasStateModifier = record.get('twClass.hasStateModifier');
+                    
+                    responseText += `${classNameValue} ${isValid ? '✅' : '❌'}\n`;
+                    responseText += `   📍 ${filePathValue}\n`;
+                    
+                    const attributes = [];
+                    if (isTailwind) attributes.push('Tailwind');
+                    if (isArbitrary) attributes.push('Arbitrary');
+                    if (isResponsive) attributes.push('Responsive');
+                    if (hasStateModifier) attributes.push('State');
+                    
+                    if (attributes.length > 0) {
+                        responseText += `   🏷️  ${attributes.join(', ')}\n`;
+                    }
+                    break;
+
+                case 'class-usage':
+                    const elementTag = record.get('element.tag');
+                    const elementLine = record.get('element.line');
+                    const usageCount = record.get('usageCount').toNumber();
+                    
+                    responseText += `${classNameValue} (used ${usageCount} times)\n`;
+                    responseText += `   📍 ${filePathValue}:${elementLine}\n`;
+                    responseText += `   🏷️  Used in: <${elementTag}>\n`;
+                    break;
+            }
+            
+            responseText += '\n';
+        });
+
+        return {
+            content: [{
+                type: 'text',
+                text: responseText
+            }]
+        };
+
+    } catch (error: any) {
+        console.error('Error in queryTailwindClasses:', error);
+        return {
+            content: [{
+                type: 'text',
+                text: `Failed to query Tailwind classes: ${error.message}`
+            }],
+            isError: true
+        };
+    } finally {
+        await session.close();
+    }
+});
+
 // Start server
 async function main() {
     console.log('🔧 Initializing MCP Code Validator...');
@@ -2578,7 +3320,7 @@ async function main() {
         console.log('🚀 Starting MCP server...');
         await server.connect(transport);
         console.log('✅ MCP Code Validator server started successfully');
-        console.log('📋 Available tools: indexFile, indexFunctions, indexDependencies, validateCode, validateFile, detectHallucinations, validateCodeQuality, suggestImprovements, validateReactHooks, manageContexts, analyzeRelationships, detectJSHallucinations, quickValidateJS, verifyNpmPackages');
+        console.log('📋 Available tools: indexFile, indexFunctions, indexDependencies, validateCode, validateFile, detectHallucinations, validateCodeQuality, suggestImprovements, validateReactHooks, manageContexts, analyzeRelationships, detectJSHallucinations, quickValidateJS, verifyNpmPackages, validateHTML, validateCSS, queryHTMLCSS, validateTailwind, indexHTMLCSS, queryTailwindClasses');
         console.log('🎯 Server ready for connections...');
     } catch (error: any) {
         console.error('❌ Failed to start MCP server:', error);

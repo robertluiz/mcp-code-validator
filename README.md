@@ -1,17 +1,20 @@
 # MCP Code Validator
 
-An advanced Model Context Protocol (MCP) server that indexes and validates TypeScript/JavaScript code using AST parsing and Neo4j graph database. **Now featuring specialized JavaScript/TypeScript hallucination detection** that validates npm packages, React hooks, Vue composables, and Node.js APIs in real-time to prevent AI coding mistakes.
+An advanced Model Context Protocol (MCP) server that indexes and validates TypeScript/JavaScript, HTML, and CSS code using AST parsing and Neo4j graph database. **Now featuring specialized JavaScript/TypeScript hallucination detection plus comprehensive HTML/CSS validation and indexing** that validates npm packages, React hooks, Vue composables, Node.js APIs, HTML structure, and CSS coherence in real-time to prevent AI coding mistakes.
 
 ## Features
 
+- **🆕 HTML/CSS Validation & Indexing**: Complete HTML structure validation, CSS coherence checking, and Neo4j indexing for frontend code analysis
 - **🆕 JavaScript/TypeScript Hallucination Detection**: Specialized detection for JS/TS ecosystem including npm packages, React hooks, Vue composables, and Node.js APIs
 - **AI Hallucination Detection**: Prevents AI agents from generating non-existent APIs and impossible code patterns
 - **Real-time Package Verification**: Live npm registry validation with typosquatting detection
 - **Framework-Specific Validation**: Dedicated detectors for React, Vue.js, Node.js, and Express
+- **HTML/JSX Coherence Validation**: Semantic structure, accessibility, performance, and best practices validation
+- **CSS Quality Analysis**: Syntax validation, specificity analysis, performance optimization, and maintainability scoring
 - **Code Quality Analysis**: Comprehensive quality scoring with A-F grades and actionable recommendations
 - **Context-Aware Validation**: Validates code against your actual codebase patterns and conventions
 - **AST-based Parsing**: Uses tree-sitter for accurate TypeScript/JavaScript code analysis
-- **Neo4j Integration**: Stores code structure in a graph database for intelligent pattern matching
+- **Neo4j Integration**: Stores code structure, HTML elements, and CSS rules in a graph database for intelligent pattern matching
 - **MCP Protocol**: Seamlessly integrates with Claude Code, Cursor, Windsurf, and other MCP-compatible tools
 
 ## 🐳 Quick Start with Docker
@@ -235,6 +238,74 @@ Context-aware suggestions based on existing codebase patterns.
 - Consistency improvements based on codebase patterns
 - Readability enhancements
 - Maintainability recommendations
+
+## HTML/CSS Validation & Indexing Tools
+
+### 11. `validateHTML`
+**NEW**: Comprehensive HTML/JSX structure and accessibility validation.
+
+**Parameters:**
+- `html`: HTML or JSX content to validate
+- `isJSX`: Whether the content is JSX (default: false)
+- `filePath`: Optional file path for context
+
+**Validates:**
+- **Semantic Structure**: Valid HTML5 elements, proper nesting, content models
+- **Accessibility**: Alt text, heading hierarchy, form labels, color contrast
+- **Performance**: Lazy loading suggestions, script optimization
+- **Best Practices**: Void elements, attribute requirements, semantic markup
+
+**Features:**
+- JSX/React component support
+- Document structure validation
+- WCAG accessibility guidelines
+- Performance optimization suggestions
+- Scoring system (0-100) with detailed feedback
+
+### 12. `validateCSS`
+**NEW**: Advanced CSS syntax, performance, and maintainability validation.
+
+**Parameters:**
+- `css`: CSS content to validate
+- `isStyled`: Whether the CSS is from styled-components (default: false)
+- `filePath`: Optional file path for context
+
+**Validates:**
+- **Syntax**: Valid CSS properties, values, units, selectors
+- **Performance**: Expensive selectors, redundant declarations, vendor prefixes
+- **Maintainability**: Specificity issues, magic numbers, hardcoded colors
+- **Accessibility**: Font sizes, line heights, motion preferences
+
+**Features:**
+- Styled-components support
+- CSS custom properties validation
+- Specificity analysis and metrics
+- Browser compatibility warnings
+- Comprehensive scoring with A-F grades
+
+### 13. `queryHTMLCSS`
+**NEW**: Query and analyze indexed HTML elements and CSS rules with relationship mapping.
+
+**Parameters:**
+- `queryType`: Type of query (`html-elements`, `css-rules`, `style-relationships`, `unused-styles`, `element-styles`)
+- `selector`: CSS selector or HTML tag to filter (optional)
+- `filePath`: Filter by specific file path (optional)
+- `projectContext`: Project context (default: "default")
+- `branch`: Git branch (default: "main")
+- `limit`: Maximum number of results (default: 50)
+
+**Query Types:**
+- **html-elements**: Find HTML elements by tag or class
+- **css-rules**: Find CSS rules by selector with specificity analysis
+- **style-relationships**: Map HTML elements to their CSS rules
+- **unused-styles**: Identify orphaned CSS rules
+- **element-styles**: Show all styles applied to specific elements
+
+**Features:**
+- Cross-file relationship analysis
+- Unused CSS detection
+- Style dependency mapping
+- Performance impact analysis
 
 ## Installation
 

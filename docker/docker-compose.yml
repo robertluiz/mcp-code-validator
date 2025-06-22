@@ -25,6 +25,8 @@ services:
       - mcp-network
 
   mcp-server:
+    ports:
+      - "8080:8080"  # Expose MCP port
     build:
       context: ..
       dockerfile: docker/Dockerfile
